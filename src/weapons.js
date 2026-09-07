@@ -132,10 +132,10 @@ export class Gun extends ViewModel {
     const ctx = this.ctx, P = ctx.player; this.fireT = this.interval; this.mag--;
     const spreadNow = this.spreadCur; this.spreadCur = Math.min(this.spreadCur + this.spreadKick, this.spreadMax);
     let hits = 0;
-    for (let i = 0; i < this.pellets; i++) if (this.fireRay(P.eye, P.aimDir(spreadNow))) hits++;
+    for (let i = 0; i < this.pellets; i++) if (this.fireRay(P.aimOrigin, P.aimDir(spreadNow))) hits++;
     // fx
     this.flash.visible = true; this.flashT = 0.045; this.flash.rotation.z = rand(0, TAU); this.flash.scale.setScalar(this.flashScale * rand(0.8, 1.4));
-    this.muzzle.getWorldPosition(_v); _v2.copy(P.forward);
+    this.shotPoint(_v); _v2.copy(P.aimFwd);
     ctx.effects.strokeBurst(_v, INK.ORANGE, 4 + this.pellets, 6 * this.flashScale, { life: 0.08, size: 0.03, gravity: 0, drag: 8 });
     ctx.effects.smoke(_v, _v2, this.kind === 'shotgun' ? 5 : 2);
     if (this.shell && this.reloadType !== 'shells') this._ejectShell();
@@ -145,6 +145,17 @@ export class Gun extends ViewModel {
     audio[this.sound](); ctx.input.rumble(0.15 + this.fovKick * 0.08, 0.5, 40 + this.fovKick * 15); ctx.effects.shakeAmt += 0.02 + this.fovKick * 0.02;
     if (hits > 0 && this.kind === 'shotgun') ctx.game.hitstop(0.03, 0.3);
     if (this.mag === 0 && this.reloadType === 'mag') setTimeout(() => { if (this.mag === 0 && !this.reloading) this.startReload(); }, 250);
+  }
+  // Where the shot visibly leaves from. Normally the muzzle — but behind a scope the gun is not
+  // drawn at all, and its muzzle sits a couple of degrees below the sight line, so tracers and
+  // smoke appear out of thin air well under the crosshair. With no barrel on screen to be attached
+  // to, put the shot on the sight line at the same distance out: it leaves the middle of the scope.
+  shotPoint(out) {
+    const P = this.ctx.player;
+    this.muzzle.getWorldPosition(out);
+    if (!this.scope || this.root.visible) return out;
+    const fwd = out.sub(P.aimOrigin).dot(P.aimFwd);
+    return out.copy(P.aimOrigin).addScaledVector(P.aimFwd, Math.max(0.3, fwd));
   }
   fireRay(origin, dir) {
     const ctx = this.ctx; const hitE = ctx.enemies.raycast(origin, dir, 300), hitW = ctx.world.raycast(origin, dir, 300, SEE_THROUGH); let end, hit = false;
@@ -162,7 +173,7 @@ export class Gun extends ViewModel {
       ctx.enemies.damage(hitE.enemy, d, { point: hitE.point, dir, part: hitE.part, source: this.kind, crit }); hit = true;
     } else if (hitW) { end = hitW.point; ctx.effects.bulletImpact(hitW.point, hitW.normal, INK.BLUE); if (Math.random() < 0.25) audio.ricochet(hitW.point); }
     else end = origin.clone().addScaledVector(dir, 300);
-    this.muzzle.getWorldPosition(_v); ctx.effects.tracer(_v, end, INK.BLUE, this.tracer, 0.05);
+    this.shotPoint(_v); ctx.effects.tracer(_v, end, INK.BLUE, this.tracer, 0.05);
     if (ctx.onShot) ctx.onShot(end);
     return hit;
   }

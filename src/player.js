@@ -19,6 +19,10 @@ export class Player {
     this.body = makeBody(ctx.level.playerStart, 0.35, STAND_H, 0.55);
     this.yaw = 0; this.pitch = 0; this.maxHp = 120; this.hp = 120; this.alive = true; this.regenDelay = 4.5; this.regenRate = 11; this.nadeCharge = 0; this._nadeHeld = false; this.grapStam = 1; this.blockHeld = 0; this.stamPause = 0;
     this.eye = new THREE.Vector3(); this.center = new THREE.Vector3(); this.forward = new THREE.Vector3(0, 0, -1); this.right = new THREE.Vector3(1, 0, 0);
+    // Where the camera actually ended up last frame, recoil springs and shake included. `forward`
+    // is the clean look direction and drives movement; this is the one the crosshair sits on, so
+    // it is the one shots have to use or the reticle is lying about where the bullet goes.
+    this.aimOrigin = new THREE.Vector3(); this.aimFwd = new THREE.Vector3(0, 0, -1); this.aimRight = new THREE.Vector3(1, 0, 0);
     this.speed = 0; this.hurtFx = 0; this.flashFx = 0; this.lastDamageT = 10;
     this.rig = new THREE.Group(); this.camera.add(this.rig); ctx.scene.add(this.camera);
     this.weapons = [new Rifle(ctx), new Shotgun(ctx), new Sniper(ctx), new Katana(ctx)]; this.katanaIndex = 3;
@@ -47,7 +51,7 @@ export class Player {
   }
   clearNades() { for (const n of this.nades) this.ctx.scene.remove(n.mesh); this.nades.length = 0; }
   get isBlocking() { return this.weapon.kind === 'katana' && this.weapon.blocking; }
-  aimDir(spread = 0) { const d = this.forward.clone(); if (spread > 0) { d.addScaledVector(this.right, rand(-spread, spread)); d.y += rand(-spread, spread); d.normalize(); } return d; }
+  aimDir(spread = 0) { const d = this.aimFwd.clone(); if (spread > 0) { d.addScaledVector(this.aimRight, rand(-spread, spread)); d.y += rand(-spread, spread); d.normalize(); } return d; }
   recoil(p, y) { this.pitch = clamp(this.pitch + p * 0.55, -1.5, 1.5); this.recoilPitch.kick(p * 22); this.recoilYaw.kick(y * 30); }
   kickFov(v) { this.fovKick.kick(v * 30); }
   lunge(speed) {
@@ -104,6 +108,7 @@ export class Player {
   idleCam(t) {
     const c = this.camera; c.position.set(Math.sin(t * 0.08) * 70, 30 + Math.sin(t * 0.23) * 4, Math.cos(t * 0.08) * 70); c.lookAt(0, 10, 0); this.rig.visible = false;
     this.eye.copy(c.position); this.center.copy(c.position); c.getWorldDirection(this.forward); this.right.set(this.forward.z, 0, -this.forward.x).normalize();
+    this.aimOrigin.copy(c.position); this.aimFwd.copy(this.forward); this.aimRight.copy(this.right);
     if (Math.abs(c.fov - 70) > 0.01) { c.fov = 70; c.updateProjectionMatrix(); }
   }
 
@@ -334,7 +339,7 @@ export class Player {
   // only when they are genuinely near the aim line and not behind whatever you are pointing at,
   // so the hook stops jumping to rings above your head that you never aimed at.
   _findGrappleTarget() {
-    const ctx = this.ctx, o = this.eye, d = this.forward, maxD = 75;
+    const ctx = this.ctx, o = this.aimOrigin, d = this.aimFwd, maxD = 75;
     const hitW = ctx.world.raycast(o, d, maxD, NO_GRAPPLE);
     const wallDist = hitW ? hitW.dist : maxD;
     // exact hit on an enemy
@@ -430,7 +435,15 @@ export class Player {
     this.eye.set(b.pos.x, b.pos.y + this.eyeH + this.landDip.value * 0.07 + bobY, b.pos.z);
     this.center.set(b.pos.x, b.pos.y + b.height * 0.55, b.pos.z);
     cam.position.copy(this.eye).addScaledVector(this.right, bobX + (Math.random() - 0.5) * shk * 0.07); cam.position.y += (Math.random() - 0.5) * shk * 0.07;
-    cam.rotation.set(this.pitch + this.recoilPitch.value + (Math.random() - 0.5) * shk * 0.035, this.yaw + this.recoilYaw.value + (Math.random() - 0.5) * shk * 0.035, this.roll + Math.sin(this.bobPhase * 0.5) * 0.004 * this.bobAmt);
+    const aimP = this.pitch + this.recoilPitch.value + (Math.random() - 0.5) * shk * 0.035;
+    const aimY = this.yaw + this.recoilYaw.value + (Math.random() - 0.5) * shk * 0.035;
+    cam.rotation.set(aimP, aimY, this.roll + Math.sin(this.bobPhase * 0.5) * 0.004 * this.bobAmt);
+    // The gun fires along this, not along `forward`: same pitch and yaw the camera was just given,
+    // so whatever the crosshair is covering is what the ray hits. (Euler order is YXZ, and the
+    // roll term is a rotation about the view axis, so neither of them bends this direction.)
+    this.aimOrigin.copy(cam.position);
+    this.aimFwd.set(-Math.sin(aimY) * Math.cos(aimP), Math.sin(aimP), -Math.cos(aimY) * Math.cos(aimP));
+    this.aimRight.set(Math.cos(aimY), 0, -Math.sin(aimY));
     const sp3 = b.vel.length();
     let fov = 82 + clamp((sp3 - 7) / 16, 0, 1) * 8 + (this._sprinting ? 3 : 0) + (this.sliding ? 4 : 0) + (this.grapple.state === 'on' ? 3 : 0) + this.fovKick.value;
     if (this._aiming) fov = this.weapon.adsFov;
