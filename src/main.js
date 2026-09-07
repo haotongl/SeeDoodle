@@ -123,7 +123,17 @@ ctx.hitPlayer = (t, dmg, info) => {
   // a slash is only parried by a guard that just came up and faces you
   if (facing > 0.6 && frontHit && info.source === 'katana' && t.parryWindow) { effects.strokeBurst(info.point, INK.ORANGE, 10, 6, { life: 0.25, size: 0.04 }); audio.shieldHit(t.center); game.hitstop(0.08, 0.15); player.weapons[player.katanaIndex].cooldown = Math.max(player.weapons[player.katanaIndex].cooldown, 0.6); input.rumble(0.6, 0.3, 90); hud.tip('PARRIED', 0.9); return; }
   effects.blood(info.point, info.dir, clamp(0.4 + dmg / 80, 0.4, 1.6), { ink: INK.RED }); hud.hitmarker(false, info.crit); audio.hitEnemy(t.center); t.flash();
-  net.sendTo(t.id, 'pdmg', { amount: Math.round(dmg), from: player.center.toArray().map((v) => +v.toFixed(1)), by: net.id, crit: !!info.crit, src: info.source });
+  // We show the hit at once - the shot landed on our screen and that is what the player judges us by -
+  // but we do not get to tell the other end it was hurt. The claim goes to the server, which winds
+  // that player back to where our screen had them and decides. Send the ray we actually fired so
+  // there is something to check it against; the katana has no ray, only a reach.
+  const claim = { k: info.source, dmg: Math.round(dmg), crit: !!info.crit, part: info.part || null };
+  if (info.dir && info.dist > 0) {
+    claim.r = +info.dist.toFixed(2);
+    claim.d = [+info.dir.x.toFixed(4), +info.dir.y.toFixed(4), +info.dir.z.toFixed(4)];
+    claim.o = [+(info.point.x - info.dir.x * info.dist).toFixed(2), +(info.point.y - info.dir.y * info.dist).toFixed(2), +(info.point.z - info.dir.z * info.dist).toFixed(2)];
+  }
+  net.hit(t.id, claim);
 };
 // a slash through another player's rope cuts it: their client drops the hook
 const _rp = new THREE.Vector3(), _rq = new THREE.Vector3();
@@ -466,7 +476,9 @@ function addRemote(id, name) {
     if (coop()) { if (net.isHost) net.sendTo(t.id, 'pdmg', { amount: Math.round(amount), from: at, by: null, src: 'enemy' }); return; }
     if (!ctx.canHurt(t)) return;
     hud.hitmarker(false, false);
-    net.sendTo(t.id, 'pdmg', { amount: Math.round(amount), from: at, by: net.id, src: 'grenade' });
+    // A blast is claimed by where it went off, not by a ray - the server checks that they were
+    // standing inside it a round trip ago, and that we were near enough to have thrown it.
+    net.hit(t.id, { k: 'grenade', dmg: Math.round(amount), at });
   };
   remote.set(id, rp); return rp;
 }

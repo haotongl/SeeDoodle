@@ -70,6 +70,17 @@ who dies, while enemy *projectiles* are replayed on every client so each one app
 locally and reacts without waiting for a round trip. Melee and blast damage stay with the host and
 arrive as a message.
 
+Damage between *players* is not the host's to give, and it is not the shooter's either. A client that
+thinks it hit someone sends a claim — the weapon, the damage, and the ray it fired — and the server
+decides. Because a claim describes something the shooter saw a round trip and an interpolation buffer
+ago, the server rewinds: it keeps 1.5 s of everyone's positions from the movement feed it is already
+relaying, times each client's round trip itself (never asking, since a bigger number would buy a
+deeper rewind), and tests the shot against where the target stood `rtt + 80 ms` ago, capped at half a
+second. It then checks the damage against what that gun can do, the origin against where the shooter
+was, and the rate against what the gun can fire. It has no copy of the level and no skeleton, so it
+cannot know a wall was in the way and it tests a capsule rather than animated limbs — but the shot
+now has to be plausible, and the latency is out of the way when it is judged.
+
 ## Layout
 
 ```

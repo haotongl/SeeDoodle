@@ -57,7 +57,7 @@ export class Net {
     this.onPeerJoin = null; this.onPeerLeave = null; this.onDisconnect = null; this.onAlias = null; this.onHostChange = null;
     this.maxPlayers = 10; this._accepting = true; this._inMatch = false; this._hostName = '';
     this.stats = { sent: 0, recv: 0 }; this.isPublic = false;
-    this._waits = new Map(); this._waitSeq = 0; this._pingT = null;
+    this._waits = new Map(); this._waitSeq = 0; this._pingT = null; this.rtt = 0;
   }
   get active() { return !!this.sock && this.connected; }
   get peerIds() { return [...this.conns.keys()]; }
@@ -97,7 +97,7 @@ export class Net {
         sock.onmessage = (ev) => this._onMessage(ev.data);
         sock.onclose = () => this._onClose();
         sock.onerror = () => { /* onclose always follows */ };
-        this._pingT = setInterval(() => this._raw({ t: 'ping' }), 15000);
+        this._pingT = setInterval(() => this._raw({ t: 'ping', d: performance.now() }), 15000);
         if (this._hostName) this._raw({ t: 'name', name: this._hostName });
         resolve();
       };
@@ -178,7 +178,10 @@ export class Net {
         if (this.onDisconnect) this.onDisconnect(m.reason || '');
         break;
       case 'm': this._emit(m.tt, m.d, m.from); break;
-      case 'pong': break;
+      // the server times our round trip itself so it knows how far to rewind the world when it
+      // judges a shot; all this end has to do is answer, echoing its clock back untouched
+      case 'ping': this._raw({ t: 'pong', d: m.d }); break;
+      case 'pong': if (typeof m.d === 'number') this.rtt = Math.round(performance.now() - m.d); break;
       default: break;
     }
   }
@@ -249,5 +252,13 @@ export class Net {
     if (!this.connected) return;
     this.stats.sent++;
     this._raw({ t: 'm', tt: type, d: data, to: pid });
+  }
+  // A shot we believe landed. This is a claim, not damage: the server rewinds the target to where
+  // it was on our screen and decides. It used to be `sendTo(id, 'pdmg')`, which the other end
+  // simply believed, and which the server now refuses to carry.
+  hit(pid, claim) {
+    if (!this.connected) return;
+    this.stats.sent++;
+    this._raw({ t: 'hit', to: pid, ...claim });
   }
 }
