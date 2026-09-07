@@ -1,0 +1,253 @@
+// Networking over a plain WebSocket to the LAN server in ../server.js.
+//
+// This used to be WebRTC peer-to-peer through a public signalling service, which needs the
+// internet and tends to fall over on a closed network (STUN unreachable, mDNS candidates blocked,
+// NAT hairpinning). Now one machine runs the server and everyone talks to it: rooms live there,
+// and it does the message routing the host used to do by hand.
+//
+// The public shape of this class is deliberately unchanged from the peer-to-peer version, so the
+// game code above it did not have to be rewritten: one host per room is still the authority, and
+// send/broadcast/sendTo still mean "to everyone", "to everyone but me", "to one player".
+
+const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+export const makeCode = () => Array.from({ length: 5 }, () => ALPHABET[Math.floor(Math.random() * ALPHABET.length)]).join('');
+
+const DEFAULT_PORT = 8080;
+const OPEN_TIMEOUT = 8000, REQ_TIMEOUT = 12000;
+
+// Turn whatever someone typed into a ws:// url. Accepts a bare IPv4, a bare IPv6 (with or without
+// brackets), either with an optional :port, a hostname, or a full url. Empty means "wherever this
+// page came from", which is the common case: you opened the host's link, so the host is the server.
+export function serverURL(addr) {
+  const secure = typeof location !== 'undefined' && location.protocol === 'https:';
+  const scheme = secure ? 'wss:' : 'ws:';
+  let s = String(addr || '').trim();
+  if (!s) {
+    if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) return `${scheme}//${location.host}/ws`;
+    return `ws://localhost:${DEFAULT_PORT}/ws`;
+  }
+  if (/^(wss?|https?):\/\//i.test(s)) {
+    const u = new URL(s);
+    return `${u.protocol === 'https:' || u.protocol === 'wss:' ? 'wss:' : 'ws:'}//${u.host}/ws`;
+  }
+  const fallbackPort = (typeof location !== 'undefined' && location.port) || DEFAULT_PORT;
+  let host, port = fallbackPort;
+  if (s[0] === '[') {                                   // [::1] or [::1]:9000
+    const end = s.indexOf(']');
+    if (end < 0) throw new Error('that address is missing a closing bracket');
+    host = s.slice(0, end + 1);
+    const rest = s.slice(end + 1);
+    if (rest.startsWith(':')) port = rest.slice(1);
+  } else if ((s.match(/:/g) || []).length >= 2) {        // bare IPv6, so every colon is part of it
+    host = `[${s}]`;
+  } else {
+    const i = s.lastIndexOf(':');
+    if (i > 0) { host = s.slice(0, i); port = s.slice(i + 1); } else host = s;
+  }
+  if (!host || host === '[]') throw new Error('that does not look like an address');
+  if (!/^\d+$/.test(String(port)) || Number(port) < 1 || Number(port) > 65535) throw new Error('that port does not look right');
+  return `${scheme}//${host}:${port}/ws`;
+}
+
+export class Net {
+  constructor() {
+    this.sock = null; this.url = null; this.conns = new Map(); this.isHost = false;
+    this.id = null; this.code = null; this.hostId = null; this.aliasCode = null;
+    this.handlers = new Map(); this.connected = false;
+    this.onPeerJoin = null; this.onPeerLeave = null; this.onDisconnect = null; this.onAlias = null; this.onHostChange = null;
+    this.maxPlayers = 10; this._accepting = true; this._inMatch = false; this._hostName = '';
+    this.stats = { sent: 0, recv: 0 }; this.isPublic = false;
+    this._waits = new Map(); this._waitSeq = 0; this._pingT = null;
+  }
+  get active() { return !!this.sock && this.connected; }
+  get peerIds() { return [...this.conns.keys()]; }
+  on(type, fn) { this.handlers.set(type, fn); }
+  _emit(type, data, from) { const h = this.handlers.get(type); if (h) h(data, from); }
+
+  // the host advertises these three to the server so the lobby list stays honest
+  get accepting() { return this._accepting; }
+  set accepting(v) { this._accepting = !!v; this._pushState(); }
+  get inMatch() { return this._inMatch; }
+  set inMatch(v) { this._inMatch = !!v; this._pushState(); }
+  get hostName() { return this._hostName; }
+  set hostName(v) { this._hostName = v; if (this.sock && this.sock.readyState === 1) this._raw({ t: 'name', name: v }); }
+  _pushState() { if (this.isHost && this.sock && this.sock.readyState === 1) this._raw({ t: 'state', accepting: this._accepting, inMatch: this._inMatch }); }
+
+  // ---- transport ----
+  setServer(addr) { const u = serverURL(addr); if (u !== this.url) { this.url = u; this._close(); } return u; }
+  _raw(obj) { const s = this.sock; if (s && s.readyState === 1) s.send(JSON.stringify(obj)); }
+  _close() {
+    clearInterval(this._pingT); this._pingT = null;
+    const s = this.sock; this.sock = null;
+    if (s) { s.onopen = s.onmessage = s.onerror = s.onclose = null; try { s.close(); } catch (e) { /* already gone */ } }
+    for (const [, w] of this._waits) w.reject(new Error('disconnected from the server'));
+    this._waits.clear();
+  }
+  async _ensure() {
+    if (this.sock && this.sock.readyState === 1) return;
+    if (this._opening) return this._opening;
+    if (!this.url) this.url = serverURL('');
+    this._close();
+    this._opening = new Promise((resolve, reject) => {
+      let sock;
+      try { sock = new WebSocket(this.url); } catch (e) { reject(new Error('that address is not reachable')); return; }
+      const timer = setTimeout(() => { try { sock.close(); } catch (e) { /* ignore */ } reject(new Error('the server did not answer')); }, OPEN_TIMEOUT);
+      sock.onopen = () => {
+        clearTimeout(timer); this.sock = sock;
+        sock.onmessage = (ev) => this._onMessage(ev.data);
+        sock.onclose = () => this._onClose();
+        sock.onerror = () => { /* onclose always follows */ };
+        this._pingT = setInterval(() => this._raw({ t: 'ping' }), 15000);
+        if (this._hostName) this._raw({ t: 'name', name: this._hostName });
+        resolve();
+      };
+      sock.onerror = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
+      sock.onclose = () => { clearTimeout(timer); reject(new Error('could not reach the server')); };
+    }).finally(() => { this._opening = null; });
+    return this._opening;
+  }
+  _onClose() {
+    this.sock = null; clearInterval(this._pingT); this._pingT = null;
+    for (const [, w] of this._waits) w.reject(new Error('lost the connection to the server'));
+    this._waits.clear();
+    if (this.connected) { this.connected = false; this.conns.clear(); if (this.onDisconnect) this.onDisconnect(); }
+  }
+  // one in-flight request per kind; the reply carries `for` so it can be matched back
+  _request(msg, kind, timeoutMs = REQ_TIMEOUT) {
+    return new Promise((resolve, reject) => {
+      const key = kind + ':' + (++this._waitSeq);
+      const timer = setTimeout(() => { this._waits.delete(key); reject(new Error('the server did not answer')); }, timeoutMs);
+      this._waits.set(key, {
+        kind,
+        resolve: (v) => { clearTimeout(timer); this._waits.delete(key); resolve(v); },
+        reject: (e) => { clearTimeout(timer); this._waits.delete(key); reject(e); },
+      });
+      this._raw(msg);
+    });
+  }
+  _settle(kind, err, val) {
+    for (const [key, w] of this._waits) {
+      if (w.kind !== kind) continue;
+      this._waits.delete(key);
+      if (err) w.reject(err); else w.resolve(val);
+      return true;
+    }
+    return false;
+  }
+
+  _onMessage(raw) {
+    let m; try { m = JSON.parse(raw); } catch (e) { return; }
+    if (!m || typeof m !== 'object') return;
+    this.stats.recv++;
+    switch (m.t) {
+      case 'hello': this.id = m.id; if (m.max) this.maxPlayers = m.max; break;
+      case 'created': this._settle('create', null, m); break;
+      case 'joined': this._settle('join', null, m) || this._settle('quick', null, m); break;
+      case 'list': this._settle('list', null, m.rooms || []); break;
+      case 'alias':
+        this.aliasCode = m.code; this.code = m.code;
+        if (this.onAlias) this.onAlias(m.code);
+        break;
+      case 'roominfo': if (m.code) { this.code = m.code; this.aliasCode = m.code; } break;
+      case 'error': {
+        const err = new Error(m.message || 'the server refused that');
+        if (!this._settle(m.for || '', err)) this._emit('refused', { reason: err.message });
+        break;
+      }
+      case 'peer':
+        if (!this.connected) break;
+        this.conns.set(m.id, this._conn(m.id));
+        if (this.isHost && this.onPeerJoin) this.onPeerJoin(m.id, m.meta || {});
+        break;
+      case 'gone':
+        if (!this.conns.has(m.id)) break;
+        this.conns.delete(m.id);
+        if (this.isHost) { if (this.onPeerLeave) this.onPeerLeave(m.id); }
+        else this._emit('leave', { id: m.id });
+        break;
+      case 'host': {
+        const wasHost = this.isHost;
+        this.hostId = m.id; this.isHost = m.id === this.id;
+        if (m.code) this.code = m.code;
+        this.conns.delete(this.id);
+        if (this.onHostChange) this.onHostChange(m.id, this.isHost && !wasHost);
+        break;
+      }
+      case 'closed':
+        this.connected = false; this.conns.clear();
+        if (this.onDisconnect) this.onDisconnect(m.reason || '');
+        break;
+      case 'm': this._emit(m.tt, m.d, m.from); break;
+      case 'pong': break;
+      default: break;
+    }
+  }
+  // main.js closes a silent player's connection by hand; with a server that is a kick
+  _conn(id) { return { peer: id, open: true, close: () => this._raw({ t: 'kick', id, reason: 'lost connection' }) }; }
+  _adopt(res, isHost) {
+    this.connected = true; this.isHost = isHost;
+    this.id = res.id || this.id; this.hostId = res.hostId; this.code = res.code; this.aliasCode = res.code;
+    this.isPublic = !!res.isPublic; if (res.max) this.maxPlayers = res.max;
+    this.conns.clear();
+    for (const p of res.members || []) if (p.id !== this.id) this.conns.set(p.id, this._conn(p.id));
+    this._pushState();
+  }
+
+  // ---- lobby creation / joining ----
+  async host({ isPublic = false, code = null } = {}) {
+    this.leave();
+    await this._ensure();
+    const res = await this._request({ t: 'create', code, isPublic, name: this._hostName, max: this.maxPlayers }, 'create');
+    this._adopt(res, true);
+    this._accepting = true; this._pushState();
+    return this.code;
+  }
+  async join(code, meta = {}, wantId = null) {
+    this.leave();
+    code = String(code || '').trim().toUpperCase();
+    if (!code) throw new Error('enter a lobby code');
+    await this._ensure();
+    const res = await this._request({ t: 'join', code, name: meta.name || this._hostName, meta }, 'join');
+    this._adopt(res, res.hostId === (res.id || this.id));
+    return this.code;
+  }
+  async quickJoin(meta = {}, onStatus = null) {
+    this.leave();
+    await this._ensure();
+    if (onStatus) onStatus('looking for an open lobby…');
+    const res = await this._request({ t: 'quick', name: meta.name || this._hostName, meta }, 'quick');
+    this._adopt(res, res.hostId === (res.id || this.id));
+    return this.code;
+  }
+  async listLobbies(meta = {}, onStatus = null) {
+    if (this.active) throw new Error('leave the lobby first');
+    await this._ensure();
+    if (onStatus) onStatus('looking…');
+    return await this._request({ t: 'list' }, 'list', 8000);
+  }
+  // the room keeps answering on the code people already know
+  claimAlias(code) {
+    if (!this.isHost || !code) return;
+    this._raw({ t: 'alias', code: String(code).toUpperCase() });
+  }
+  leave() {
+    if (this.sock && this.sock.readyState === 1 && this.connected) this._raw({ t: 'leave' });
+    this.connected = false; this.isHost = false; this.conns.clear();
+    this.code = null; this.hostId = null; this.aliasCode = null; this._inMatch = false;
+  }
+  disconnect() { this.leave(); this._close(); }
+
+  // ---- messaging ----
+  // host: to everyone; client: to the host, and on to everyone if relay is set
+  send(type, data, relay = false) {
+    if (!this.connected) return;
+    this.stats.sent++;
+    this._raw({ t: 'm', tt: type, d: data, relay: !!relay });
+  }
+  broadcast(type, data) { this.send(type, data, true); }
+  sendTo(pid, type, data) {
+    if (!this.connected) return;
+    this.stats.sent++;
+    this._raw({ t: 'm', tt: type, d: data, to: pid });
+  }
+}
