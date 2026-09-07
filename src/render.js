@@ -41,6 +41,7 @@ uniform float uInk;
 uniform float uFill;
 uniform float uShadeScale;
 uniform float uShadeBias;
+uniform float uViewModel;
 uniform vec3 uLightDir;
 varying vec3 vNormalV;
 varying vec4 vColorData;
@@ -52,7 +53,10 @@ void main() {
   if (vColorData.a > 0.0) { ink = vColorData.r; fill = vColorData.g; }
   float shade = clamp(ndl * uShadeScale + uShadeBias, 0.0, 1.0);
   if (fill > 0.5) shade = -1.0;
-  gl_FragColor = vec4(shade, ink, n.x, n.y);
+  // The post pass hatches the held weapon in screen space and everything else in world space, so it
+  // has to know which is which. There are six inks and the channel is a half float, so the flag
+  // rides along as +8 on the id rather than costing a whole render target.
+  gl_FragColor = vec4(shade, ink + 8.0 * uViewModel, n.x, n.y);
 }`;
 
 export function makeInkMaterial(opts = {}) {
@@ -60,12 +64,20 @@ export function makeInkMaterial(opts = {}) {
     uniforms: {
       uInk: { value: opts.ink ?? INK.BLUE }, uFill: { value: opts.fill ? 1 : 0 },
       uShadeScale: { value: opts.shadeScale ?? 1.0 }, uShadeBias: { value: opts.shadeBias ?? 0.0 },
-      uLightDir: shared.uLightDir, uTime: shared.uTime,
+      uViewModel: { value: 0 }, uLightDir: shared.uLightDir, uTime: shared.uTime,
     },
     vertexShader: inkVert, fragmentShader: inkFrag, side: opts.side ?? THREE.FrontSide,
   });
   m.inkId = opts.ink ?? INK.BLUE;
   return m;
+}
+// Marks everything under `root` as first-person kit. Call it on the camera rig once it is built;
+// the flag is per material, and nothing in the rig shares a material with the world.
+export function markViewModel(root) {
+  root.traverse((o) => {
+    const m = o.material; if (!m) return;
+    for (const mm of Array.isArray(m) ? m : [m]) if (mm.uniforms && mm.uniforms.uViewModel) mm.uniforms.uViewModel.value = 1;
+  });
 }
 export function setInk(mat, ink) { mat.uniforms.uInk.value = ink; mat.inkId = ink; }
 export function setFill(mat, fill) { mat.uniforms.uFill.value = fill ? 1 : 0; }
@@ -102,7 +114,7 @@ float vnoise(vec2 p) {
 }
 float linDepth(float z) { float zn = z * 2.0 - 1.0; return 2.0 * uNear * uFar / (uFar + uNear - zn * (uFar - uNear)); }
 vec3 inkColor(float id) {
-  int i = int(id + 0.5);
+  int i = int(mod(id + 0.5, 8.0));   // ids of 8 and up are the same inks, flagged as view model
   if (i <= 0) return uInks[0]; if (i == 1) return uInks[1]; if (i == 2) return uInks[2];
   if (i == 3) return uInks[3]; if (i == 4) return uInks[4]; return uInks[5];
 }
@@ -111,6 +123,23 @@ float stripes(vec2 p, vec2 dir, float spacing, float width) {
   float f = abs(fract(t / spacing) - 0.5) * spacing;
   float soft = width * 0.6;
   return 1.0 - smoothstep(width * 0.5 - soft, width * 0.5 + soft, f);
+}
+// One pass of cross-hatching at a given stroke spacing: a second and third direction come in as the
+// surface gets darker, so shade reads as more pen on the paper rather than just finer lines.
+float hatchAt(vec2 hp, float sp, float w, float shade) {
+  const vec2 d1 = vec2(0.7071, 0.7071);
+  const vec2 d2 = vec2(-0.7071, 0.7071);
+  const vec2 d3 = vec2(0.2588, 0.9659);
+  float h = stripes(hp, d1, sp, w) * smoothstep(0.64, 0.5, shade);
+  h = max(h, stripes(hp, d2, sp * 1.15, w) * smoothstep(0.42, 0.32, shade));
+  h = max(h, stripes(hp, d3, sp * 0.7, w) * smoothstep(0.24, 0.14, shade));
+  return max(h, smoothstep(0.12, 0.0, shade) * 0.9);
+}
+// The world-anchored version. The hand-drawn waver has to be derived from this level's own spacing
+// and applied inside here: work it out once outside and the two levels either side of a spacing
+// change would wobble by different amounts, and the crossfade between them would show a seam.
+float hatchWorld(vec2 p, float sp, float shade) {
+  return hatchAt(p + (vnoise(p * (2.5 / sp)) - 0.5) * sp * 0.4, sp, sp * 0.17, shade);
 }
 void main() {
   vec2 px = 1.0 / uRes;
@@ -149,44 +178,35 @@ void main() {
   // Hatching is anchored to the surface itself, not to the screen. The fragment's world position
   // is rebuilt from depth and the strokes are laid out in world units on whichever pair of axes
   // faces away from the surface normal, so the pattern stays put on a wall as you move past it.
-  // Line spacing steps in powers of two with distance, which keeps the on-screen density roughly
-  // constant instead of collapsing into moire on far geometry.
   float shade = s.r;
   float hatch = 0.0;
   if (!sky) {
     if (shade < 0.0) hatch = 1.0;
-    else {
-      vec2 hp; float sp, w;
-      if (d < 2.0) {
-        // the held weapon rides with the camera, so for it the screen is the stable frame
-        hp = gl_FragCoord.xy + wob * 5.0 * sc;
-        sp = 8.5 * sc; w = 1.5 * sc;
-      } else {
-        vec4 clip = vec4(vUv * 2.0 - 1.0, z * 2.0 - 1.0, 1.0);
-        vec4 vpos = uInvProj * clip; vpos /= vpos.w;
-        vec3 wpos = (uInvView * vec4(vpos.xyz, 1.0)).xyz;
-        vec2 nxy = s.ba;
-        vec3 nView = vec3(nxy, sqrt(max(0.0, 1.0 - dot(nxy, nxy))));
-        vec3 wn = normalize(mat3(uInvView) * nView);
-        vec3 an = abs(wn);
-        // project onto the plane the surface most faces, so strokes lie flat along it
-        hp = an.y > max(an.x, an.z) ? wpos.xz : (an.x > an.z ? wpos.zy : wpos.xy);
-        // pick the world spacing whose projected width is about nine pixels, quantised to powers
-        // of two so the pattern only changes density in steps and never crawls as you walk
-        float lod = exp2(floor(log2(max(1e-4, (0.0165 * d) / 0.16))));
-        sp = 0.16 * lod; w = sp * 0.17;
-        hp += (vnoise(hp * (2.5 / sp)) - 0.5) * sp * 0.4; // hand-drawn waver, fixed to the surface
-      }
-      const vec2 d1 = vec2(0.7071, 0.7071);
-      const vec2 d2 = vec2(-0.7071, 0.7071);
-      const vec2 d3 = vec2(0.2588, 0.9659);
-      float h1 = stripes(hp, d1, sp, w);
-      float h2 = stripes(hp, d2, sp * 1.15, w);
-      float h3 = stripes(hp, d3, sp * 0.7, w);
-      hatch = h1 * smoothstep(0.64, 0.5, shade);
-      hatch = max(hatch, h2 * smoothstep(0.42, 0.32, shade));
-      hatch = max(hatch, h3 * smoothstep(0.24, 0.14, shade));
-      hatch = max(hatch, smoothstep(0.12, 0.0, shade) * 0.9);
+    else if (s.g > 7.5) {
+      // The held weapon rides with the camera, so for it the screen is the stable frame. It says so
+      // itself, through the flag in the ink channel: guessing from depth used to sweep the floor you
+      // are standing on and any wall within two metres into here as well, and screen-locked strokes
+      // on world geometry are exactly the crawling this pass exists to avoid.
+      hatch = hatchAt(gl_FragCoord.xy + wob * 5.0 * sc, 8.5 * sc, 1.5 * sc, shade);
+    } else {
+      vec4 clip = vec4(vUv * 2.0 - 1.0, z * 2.0 - 1.0, 1.0);
+      vec4 vpos = uInvProj * clip; vpos /= vpos.w;
+      vec3 wpos = (uInvView * vec4(vpos.xyz, 1.0)).xyz;
+      vec2 nxy = s.ba;
+      vec3 nView = vec3(nxy, sqrt(max(0.0, 1.0 - dot(nxy, nxy))));
+      vec3 wn = normalize(mat3(uInvView) * nView);
+      vec3 an = abs(wn);
+      // project onto the plane the surface most faces, so strokes lie flat along it
+      vec2 hp = an.y > max(an.x, an.z) ? wpos.xz : (an.x > an.z ? wpos.zy : wpos.xy);
+      // Stroke spacing doubles with distance, so far geometry does not collapse into moire. The
+      // level comes from this fragment's own depth, so switching at the boundary drew hard bands
+      // across a floor that swept along with you; crossfading the two neighbouring levels the way
+      // mip mapping does makes strokes fade in and out where they stand instead of the whole
+      // pattern jumping. Held to 2cm at the near end, below which world coordinates run out of
+      // float precision and the waver goes blocky.
+      float lf = max(-3.0, log2(max(1e-4, (0.0165 * d) / 0.16)));
+      float l0 = floor(lf), sp = 0.16 * exp2(l0);
+      hatch = mix(hatchWorld(hp, sp, shade), hatchWorld(hp, sp * 2.0, shade), smoothstep(0.0, 1.0, lf - l0));
     }
   }
   float fade = mix(1.0, 0.28, smoothstep(14.0, 110.0, d));
