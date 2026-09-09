@@ -1,4 +1,6 @@
-// First-person view models + firing logic: rifle, shotgun, revolver (hitscan) and katana.
+// First-person view models + firing logic: rifle, shotgun, sniper and revolver, the rocket launcher
+// that only exists once you have found one, and the katana. Rounds are hitscan unless the match is
+// running ballistics (see ../src/bullets.js); the rocket is always a real projectile.
 import * as THREE from 'three';
 import { makeInkMaterial, INK } from './render.js';
 import { SEE_THROUGH } from './physics.js';
@@ -63,21 +65,40 @@ class ViewModel {
 }
 
 const GUNS = {
-  rifle: { name: 'RIFLE', hint: 'auto · put the red dot on them', kind: 'rifle', magSize: 35, reserve: 175, maxReserve: 350, interval: 1 / 11, damage: 24, headMul: 2.6, pellets: 1, spread: 0.016, adsSpread: 0.0034, spreadKick: 0.009, spreadMax: 0.075, adsFov: 58, sight: [0, 0.12, -0.05, 0.3], camKick: [0.009, 0.0034], modelKick: [0.25, 0.3, 2.4, -3.2, 0.9, 1.2], fovKick: 1.2, reloadDur: 1.45, reloadType: 'mag', auto: true, falloff: null, tracer: 0.02, flashScale: 1, sound: 'shot', shell: [0.02, INK.ORANGE], moveSpread: 0.0012, pvp: [19, 1.8, null] },
-  shotgun: { name: 'SHOTGUN', hint: 'pump · devastating up close', kind: 'shotgun', magSize: 6, reserve: 36, maxReserve: 72, interval: 0.78, damage: 19, headMul: 1.8, pellets: 10, spread: 0.062, adsSpread: 0.034, spreadKick: 0, spreadMax: 0.1, adsFov: 68, sight: [0, 0.095, -1.0, 0.52], camKick: [0.05, 0.012], modelKick: [0.4, 0.6, 5, -9, 2, 3], fovKick: 4, reloadDur: 0.45, reloadType: 'shells', auto: false, falloff: [11, 32, 0.22], tracer: 0.014, flashScale: 1.9, sound: 'shotgunFire', shell: [0.035, INK.RED], moveSpread: 0.0006, cycleDur: 0.45, pvp: [16, 1.6, [9, 26, 0.15]] },
-  sniper: { name: 'SNIPER', hint: 'scoped bolt action · one shot, one erasure', kind: 'sniper', scope: true, magSize: 5, reserve: 25, maxReserve: 50, interval: 0.2, damage: 150, headMul: 3, pellets: 1, spread: 0.075, adsSpread: 0.0004, spreadKick: 0.05, spreadMax: 0.14, adsFov: 20, sight: [0, 0.135, 0, 0.42], camKick: [0.055, 0.008], modelKick: [0.25, 0.8, 4.5, -11, 1.2, 2], fovKick: 4.5, reloadDur: 2.1, reloadType: 'mag', auto: false, falloff: null, tracer: 0.03, flashScale: 1.7, sound: 'sniperFire', shell: [0.03, INK.ORANGE], moveSpread: 0.004, cycleDur: 0.85, pvp: [150, 1.5, null] },
-  revolver: { name: 'REVOLVER', hint: 'hand cannon · headshots erase', kind: 'revolver', magSize: 6, reserve: 36, maxReserve: 72, interval: 0.3, damage: 62, headMul: 3, pellets: 1, spread: 0.006, adsSpread: 0.002, spreadKick: 0.02, spreadMax: 0.06, adsFov: 52, sight: [0, 0.08, -0.34, 0.42], camKick: [0.038, 0.007], modelKick: [0.3, 0.9, 3.2, -10, 1.5, 2.5], fovKick: 2.5, reloadDur: 1.9, reloadType: 'cylinder', auto: false, falloff: null, tracer: 0.026, flashScale: 1.35, sound: 'revolver', shell: null, moveSpread: 0.0015, pvp: [52, 2.9, [9, 34, 0.42]] },
+  rifle: { name: 'RIFLE', hint: 'auto · put the red dot on them', kind: 'rifle', magSize: 35, reserve: 175, maxReserve: 350, interval: 1 / 11, damage: 24, headMul: 2.6, pellets: 1, spread: 0.016, adsSpread: 0.0034, spreadKick: 0.009, spreadMax: 0.075, adsFov: 58, sight: [0, 0.12, -0.05, 0.3], camKick: [0.009, 0.0034], modelKick: [0.25, 0.3, 2.4, -3.2, 0.9, 1.2], fovKick: 1.2, reloadDur: 1.45, reloadType: 'mag', auto: true, falloff: null, tracer: 0.02, flashScale: 1, sound: 'shot', shell: [0.02, INK.ORANGE], moveSpread: 0.0012, mv: 330, maxRange: 300, pvp: [19, 1.8, null] },
+  shotgun: { name: 'SHOTGUN', hint: 'pump · devastating up close', kind: 'shotgun', magSize: 6, reserve: 36, maxReserve: 72, interval: 0.78, damage: 19, headMul: 1.8, pellets: 10, spread: 0.062, adsSpread: 0.034, spreadKick: 0, spreadMax: 0.1, adsFov: 68, sight: [0, 0.095, -1.0, 0.52], camKick: [0.05, 0.012], modelKick: [0.4, 0.6, 5, -9, 2, 3], fovKick: 4, reloadDur: 0.45, reloadType: 'shells', auto: false, falloff: [11, 32, 0.22], tracer: 0.014, flashScale: 1.9, sound: 'shotgunFire', shell: [0.035, INK.RED], moveSpread: 0.0006, cycleDur: 0.45, mv: 200, maxRange: 80, pvp: [16, 1.6, [9, 26, 0.15]] },
+  sniper: { name: 'SNIPER', hint: 'scoped bolt action · one shot, one erasure', kind: 'sniper', scope: true, magSize: 5, reserve: 25, maxReserve: 50, interval: 0.2, damage: 150, headMul: 3, pellets: 1, spread: 0.075, adsSpread: 0.0004, spreadKick: 0.05, spreadMax: 0.14, adsFov: 20, sight: [0, 0.135, 0, 0.42], camKick: [0.055, 0.008], modelKick: [0.25, 0.8, 4.5, -11, 1.2, 2], fovKick: 4.5, reloadDur: 2.1, reloadType: 'mag', auto: false, falloff: null, tracer: 0.03, flashScale: 1.7, sound: 'sniperFire', shell: [0.03, INK.ORANGE], moveSpread: 0.004, cycleDur: 0.85, mv: 450, maxRange: 300, pvp: [150, 1.5, null] },
+  // The answer to armour, and deliberately a poor answer to anything else: one tube, a two second
+  // reload, and a round slow enough (50 m/s, barely any drop) that a moving target walks out of it.
+  // `damage` is 0 on purpose — nothing about a rocket resolves as a direct hit, `blastDmg` is the
+  // whole of it. `locked` until one drops.
+  rocket: { name: 'ROCKET', hint: 'one tube · armour comes apart', kind: 'rocket', locked: true, explosive: true, blastR: 5.6, blastDmg: 480, magSize: 1, reserve: 0, maxReserve: 6, interval: 0.9, damage: 0, headMul: 1, pellets: 1, spread: 0.012, adsSpread: 0.003, spreadKick: 0, spreadMax: 0.03, adsFov: 55, sight: [0, 0.155, -0.2, 0.36], camKick: [0.07, 0.016], modelKick: [0.45, 1.1, 6.5, -15, 2, 3], fovKick: 5.5, reloadDur: 2.0, reloadType: 'mag', auto: false, falloff: null, tracer: 0.085, flashScale: 2.6, sound: 'rocketFire', shell: null, moveSpread: 0.003, mv: 50, grav: 2.2, maxRange: 160, pvp: [0, 1, null] },
+  revolver: { name: 'REVOLVER', hint: 'hand cannon · headshots erase', kind: 'revolver', magSize: 6, reserve: 36, maxReserve: 72, interval: 0.3, damage: 62, headMul: 3, pellets: 1, spread: 0.006, adsSpread: 0.002, spreadKick: 0.02, spreadMax: 0.06, adsFov: 52, sight: [0, 0.08, -0.34, 0.42], camKick: [0.038, 0.007], modelKick: [0.3, 0.9, 3.2, -10, 1.5, 2.5], fovKick: 2.5, reloadDur: 1.9, reloadType: 'cylinder', auto: false, falloff: null, tracer: 0.026, flashScale: 1.35, sound: 'revolver', shell: null, moveSpread: 0.0015, mv: 260, maxRange: 300, pvp: [52, 2.9, [9, 34, 0.42]] },
 };
 
 export class Gun extends ViewModel {
   constructor(ctx, type) {
-    super(ctx); Object.assign(this, GUNS[type]); this.isGun = true; this.mag = this.magSize;
-    this.fireT = 0; this.reloading = false; this.reloadT = 0; this.spreadCur = this.spread; this.flashT = 0; this.pumpT = 0; this.racked = false; this.needPump = false;
+    super(ctx); Object.assign(this, GUNS[type]); this.isGun = true; this.mag = this.locked ? 0 : this.magSize;
+    this.fireT = 0; this.reloading = false; this.reloadT = 0; this.spreadCur = this.spread; this.flashT = 0; this.pumpT = 0; this.pumpDur = 1; this.racked = false; this.needPump = false;
+    // How many rounds into the current burst we are, and how long that count has left to live. The
+    // recoil pattern is a function of this: see `fire`.
+    this.burst = 0; this.burstT = 0;
     this.mat = makeInkMaterial({ ink: INK.BLUE }); this.dark = makeInkMaterial({ ink: INK.BLACK }); this.red = makeInkMaterial({ ink: INK.RED, fill: true });
     this.build(); this.setSight(...this.sight);
   }
   get spreadPx() { return 5 + this.spreadCur * 900; }
-  addAmmo(n) { this.reserve = Math.min(this.reserve + n, this.maxReserve); }
+  // A thumb dragging a screen cannot make the small corrections a mouse can, so on a phone the guns
+  // are steadier than they are on a desk. The shotgun keeps its cone - that spread IS the weapon -
+  // and only loses some of the climb, which is what the getter below covers.
+  get hipEase() { return this.ctx.input.usingTouch ? (this.pellets > 1 ? 0.85 : 0.5) : 1; }
+  // No ceiling on what you can carry: a supply crate you walk over while full used to evaporate,
+  // and the HUD still cheerfully said +AMMO. `maxReserve` survives as the reference a pickup is
+  // sized against (`Player.addAmmoAll`), not as a cap.
+  addAmmo(n) { this.reserve += n; }
+  // A locked weapon is in the list but not in the world: no slot on the HUD, `switchTo` refuses it,
+  // and `addAmmoAll` walks past it. Picking one up loads it and hands you the tube.
+  unlock(rounds) { const first = this.locked; this.locked = false; if (first) this.mag = this.magSize; this.reserve += rounds; return first; }
+  relock() { this.locked = !!GUNS[this.kind].locked; if (this.locked) { this.mag = 0; this.reserve = 0; } }
   startReload() {
     if (this.reloading || this.mag >= this.magSize || this.reserve <= 0) return;
     this.reloading = true; this.reloadT = 0; this.racked = false;
@@ -85,8 +106,11 @@ export class Gun extends ViewModel {
   }
   update(dt, st) {
     this.fireT -= dt; if (this.flashT > 0) { this.flashT -= dt; if (this.flashT <= 0) this.flash.visible = false; }
+    // let go of the trigger for a third of a second and the gun is settled again: the next shot is
+    // a first shot. This is what makes tapping worth doing instead of holding it down.
+    if (this.burst && (this.burstT -= dt) <= 0) this.burst = 0;
     // moving and flying bloom the shot; aiming down the sights steadies most of that, the scope nearly all of it
-    const base = st.aim ? this.adsSpread : this.spread; let moveAdd = Math.min(st.speed, 24) * this.moveSpread + (st.grounded ? 0 : 0.01) + (st.sliding ? 0.008 : 0);
+    const base = (st.aim ? this.adsSpread : this.spread) * this.hipEase; let moveAdd = (Math.min(st.speed, 24) * this.moveSpread + (st.grounded ? 0 : 0.01) + (st.sliding ? 0.008 : 0)) * this.hipEase;
     if (st.aim) moveAdd *= this.scope ? 0.03 : 0.3;
     this.spreadCur = damp(this.spreadCur, base + moveAdd, 7, dt);
     const p = this.root.position, r = this.root.rotation;
@@ -119,7 +143,7 @@ export class Gun extends ViewModel {
       // shells: one at a time, can be interrupted by firing
       const s = Math.sin(Math.min(1, this.reloadT / this.reloadDur) * Math.PI);
       r.z += 0.35 * s; r.x += 0.15 * s; p.y -= 0.04 * s; if (this.handL) this.handL.position.set(this.handLPos.x + 0.1 * s, this.handLPos.y - 0.12 * s, this.handLPos.z + 0.55 * s);
-      if (this.reloadT >= this.reloadDur) { this.mag++; this.reserve--; this.reloadT = 0; if (this.mag >= this.magSize || this.reserve <= 0) { this.reloading = false; if (this.handL) this.handL.position.copy(this.handLPos); if (this.needPump) this.pumpT = this.cycleDur; } else audio.shell(); }
+      if (this.reloadT >= this.reloadDur) { this.mag++; this.reserve--; this.reloadT = 0; if (this.mag >= this.magSize || this.reserve <= 0) { this.reloading = false; if (this.handL) this.handL.position.copy(this.handLPos); if (this.needPump) { this.pumpT = this.pumpDur = this.cycleDur; } } else audio.shell(); }
     }
     if (st.reloadPressed && this.mag < this.magSize && this.reserve > 0 && !this.reloading && this.pumpT <= 0) { this.startReload(); return; }
     const wantFire = this.auto ? st.fire : st.firePressed;
@@ -130,18 +154,32 @@ export class Gun extends ViewModel {
   }
   fire(st) {
     const ctx = this.ctx, P = ctx.player; this.fireT = this.interval; this.mag--;
-    const spreadNow = this.spreadCur; this.spreadCur = Math.min(this.spreadCur + this.spreadKick, this.spreadMax);
+    const spreadNow = this.spreadCur; const he = this.hipEase; this.spreadCur = Math.min(this.spreadCur + this.spreadKick * he, this.spreadMax * he);
     let hits = 0;
-    for (let i = 0; i < this.pellets; i++) if (this.fireRay(P.aimOrigin, P.aimDir(spreadNow))) hits++;
+    // A rocket is a thing you watch fly whatever the ballistics setting says — it is the only
+    // weapon here whose travel time is the point rather than a realism option.
+    const ballistic = this.explosive || (ctx.ballistics && ctx.ballistics());
+    for (let i = 0; i < this.pellets; i++) {
+      const d = P.aimDir(spreadNow);
+      if (ballistic) ctx.bullets.fire(this, P.aimOrigin, d);
+      else if (this.fireRay(P.aimOrigin, d)) hits++;
+    }
     // fx
     this.flash.visible = true; this.flashT = 0.045; this.flash.rotation.z = rand(0, TAU); this.flash.scale.setScalar(this.flashScale * rand(0.8, 1.4));
     this.shotPoint(_v); _v2.copy(P.aimFwd);
     ctx.effects.strokeBurst(_v, INK.ORANGE, 4 + this.pellets, 6 * this.flashScale, { life: 0.08, size: 0.03, gravity: 0, drag: 8 });
     ctx.effects.smoke(_v, _v2, this.kind === 'shotgun' ? 5 : 2);
     if (this.shell && this.reloadType !== 'shells') this._ejectShell();
-    if (this.cycleDur) { this.pumpT = this.cycleDur + 0.12; this.pumped = false; if (this.reloadType === 'shells') this.needPump = true; }
-    const k = this.modelKick; this.recoil.kick(rand(-k[0], k[0]), rand(k[1] * 0.4, k[1]), k[2]); this.recoilRot.kick(k[3], rand(-k[4], k[4]), rand(-k[5], k[5]));
-    P.recoil(this.camKick[0] * (st.aim ? 0.7 : 1) + rand(0, this.camKick[0] * 0.3), rand(-this.camKick[1], this.camKick[1])); P.kickFov(this.fovKick);
+    if (this.cycleDur) { this.pumpT = this.pumpDur = this.cycleDur + 0.12; this.pumped = false; if (this.reloadType === 'shells') this.needPump = true; }
+    // The pattern. A settled gun's first round barely moves - hold the trigger and the muzzle walks,
+    // steeply for the first half-dozen and then levelling off around a third above where it started.
+    // The sideways wander is mostly a repeatable figure rather than a coin flip, so a spray can be
+    // learned and fought; the random part is only there to stop it feeling like a machine.
+    this.burst++; this.burstT = this.interval + 0.33;
+    const n = Math.min(this.burst - 1, 8), climb = 0.72 + n * 0.075;
+    const wander = Math.sin(this.burst * 1.9) * 0.7 + rand(-0.45, 0.45);
+    const k = this.modelKick, mk = 0.85 + climb * 0.2; this.recoil.kick(rand(-k[0], k[0]) * mk, rand(k[1] * 0.4, k[1]) * mk, k[2] * mk); this.recoilRot.kick(k[3] * mk, rand(-k[4], k[4]), rand(-k[5], k[5]));
+    P.recoil((this.camKick[0] * (st.aim ? 0.7 : 1) + rand(0, this.camKick[0] * 0.3)) * climb, this.camKick[1] * wander * climb); P.kickFov(this.fovKick);
     audio[this.sound](); ctx.input.rumble(0.15 + this.fovKick * 0.08, 0.5, 40 + this.fovKick * 15); ctx.effects.shakeAmt += 0.02 + this.fovKick * 0.02;
     if (hits > 0 && this.kind === 'shotgun') ctx.game.hitstop(0.03, 0.3);
     if (this.mag === 0 && this.reloadType === 'mag') setTimeout(() => { if (this.mag === 0 && !this.reloading) this.startReload(); }, 250);
@@ -153,29 +191,42 @@ export class Gun extends ViewModel {
   shotPoint(out) {
     const P = this.ctx.player;
     this.muzzle.getWorldPosition(out);
-    if (!this.scope || this.root.visible) return out;
+    // A phone gets the same treatment as a scope, for the same reason. The screen is a hand wide, the
+    // gun sits in the corner of it, and a tracer leaving that muzzle reads as coming out of the bottom
+    // right of the picture instead of out of the crosshair. On the sight line it leaves the middle.
+    if (!this.ctx.input.usingTouch && (!this.scope || this.root.visible)) return out;
     const fwd = out.sub(P.aimOrigin).dot(P.aimFwd);
     return out.copy(P.aimOrigin).addScaledVector(P.aimFwd, Math.max(0.3, fwd));
   }
-  fireRay(origin, dir) {
-    const ctx = this.ctx; const hitE = ctx.enemies.raycast(origin, dir, 300), hitW = ctx.world.raycast(origin, dir, 300, SEE_THROUGH); let end, hit = false;
+  // What a shot meets, and what that costs. Split out of `fireRay` so a bullet with flight time can
+  // reuse it one step at a time: `travelled` is how far the round had already flown before this
+  // step, so damage falloff reads the whole path rather than the last few metres of it, and
+  // `muzzle`/`tof` are what a PVP claim needs to describe a curve the server cannot re-trace.
+  resolveShot(origin, dir, maxDist, travelled = 0, muzzle = null, tof = 0) {
+    const ctx = this.ctx; const hitE = ctx.enemies.raycast(origin, dir, maxDist), hitW = ctx.world.raycast(origin, dir, maxDist, SEE_THROUGH);
+    let end, hit = false, stopped = true;
     // other players in a versus match are targets too; the closest thing along the ray wins
-    const hitP = ctx.raycastPlayers ? ctx.raycastPlayers(origin, dir, 300) : null;
+    const hitP = ctx.raycastPlayers ? ctx.raycastPlayers(origin, dir, maxDist) : null;
     if (hitP && (!hitE || hitP.dist < hitE.dist) && (!hitW || hitP.dist < hitW.dist)) {
-      end = hitP.point; const crit = hitP.part === 'head'; const pv = this.pvp || [this.damage, this.headMul, this.falloff]; let d = pv[0] * (crit ? pv[1] : 1);
-      if (pv[2]) d *= clamp(1 - (hitP.dist - pv[2][0]) / (pv[2][1] - pv[2][0]), pv[2][2], 1);
-      ctx.hitPlayer(hitP.player, d, { point: hitP.point, dir, part: hitP.part, source: this.kind, crit, dist: hitP.dist }); hit = true;
+      end = hitP.point; const crit = hitP.part === 'head'; const pv = this.pvp || [this.damage, this.headMul, this.falloff];
+      const far = travelled + hitP.dist; let d = pv[0] * (crit ? pv[1] : 1);
+      if (pv[2]) d *= clamp(1 - (far - pv[2][0]) / (pv[2][1] - pv[2][0]), pv[2][2], 1);
+      ctx.hitPlayer(hitP.player, d, { point: hitP.point, dir, part: hitP.part, source: this.kind, crit, dist: far, muzzle, tof }); hit = true;
     } else if (hitW && hitW.box && hitW.box.data.breakable && (!hitE || hitW.dist < hitE.dist) && ctx.breakHit) {
       end = hitW.point; ctx.breakHit(hitW.box.data.breakable, this.damage, hitW.point, dir); hit = true;
     } else if (hitE && (!hitW || hitE.dist < hitW.dist)) {
-      end = hitE.point; const crit = hitE.part === 'head'; let d = this.damage * (crit ? this.headMul : 1);
-      if (this.falloff) d *= clamp(1 - (hitE.dist - this.falloff[0]) / (this.falloff[1] - this.falloff[0]), this.falloff[2], 1);
+      end = hitE.point; const crit = hitE.part === 'head'; const far = travelled + hitE.dist; let d = this.damage * (crit ? this.headMul : 1);
+      if (this.falloff) d *= clamp(1 - (far - this.falloff[0]) / (this.falloff[1] - this.falloff[0]), this.falloff[2], 1);
       ctx.enemies.damage(hitE.enemy, d, { point: hitE.point, dir, part: hitE.part, source: this.kind, crit }); hit = true;
     } else if (hitW) { end = hitW.point; ctx.effects.bulletImpact(hitW.point, hitW.normal, INK.BLUE); if (Math.random() < 0.25) audio.ricochet(hitW.point); }
-    else end = origin.clone().addScaledVector(dir, 300);
-    this.shotPoint(_v); ctx.effects.tracer(_v, end, INK.BLUE, this.tracer, 0.05);
-    if (ctx.onShot) ctx.onShot(end);
-    return hit;
+    else { end = origin.clone().addScaledVector(dir, maxDist); stopped = false; }
+    return { end, hit, stopped };
+  }
+  fireRay(origin, dir) {
+    const ctx = this.ctx, r = this.resolveShot(origin, dir, 300);
+    this.shotPoint(_v); ctx.effects.tracer(_v, r.end, INK.BLUE, this.tracer, 0.05);
+    if (ctx.onShot) ctx.onShot(r.end);
+    return r.hit;
   }
   _ejectShell(spread = 1) {
     if (!this.shell) return; const P = this.ctx.player; this.ejectPt.getWorldPosition(_v);
@@ -257,6 +308,49 @@ export class Sniper extends Gun {
     this.muzzle = new THREE.Object3D(); this.muzzle.position.set(0, 0.02, -1.6); g.add(this.muzzle);
     this.ejectPt = new THREE.Object3D(); this.ejectPt.position.set(0.06, 0.04, 0.06); g.add(this.ejectPt);
     this.flash = makeFlash(g, 0, 0.02, -1.6, 1);
+  }
+}
+
+export class Rocket extends Gun {
+  constructor(ctx) { super(ctx, 'rocket'); this.basePos.set(0.16, -0.14, -0.3); }
+  build() {
+    const g = this.root, mat = this.mat, dark = this.dark, red = this.red;
+    // shoulder tube: wide bore up front, a flared blast cone out the back past your ear
+    cyl(0.085, 1.5, 0, 0.02, -0.35, mat, g, 'z', 10);
+    cyl(0.105, 0.1, 0, 0.02, -1.06, dark, g, 'z', 10);
+    const cone = new THREE.Mesh(new THREE.ConeGeometry(0.13, 0.26, 10, 1, true), dark); cone.rotation.x = -Math.PI / 2; cone.position.set(0, 0.02, 0.5); g.add(cone);
+    // the warhead, visibly sitting in the tube — this is the "loaded" tell, hidden while empty
+    this.warhead = new THREE.Group(); this.warhead.position.set(0, 0.02, -1.0); g.add(this.warhead);
+    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.062, 0.2, 8), red); nose.rotation.x = -Math.PI / 2; nose.position.z = -0.1; this.warhead.add(nose);
+    cyl(0.055, 0.18, 0, 0, 0.05, red, this.warhead, 'z', 8);
+    for (let i = 0; i < 3; i++) { const f = bx(0.01, 0.09, 0.09, 0, 0, 0.12, dark, this.warhead); f.rotation.z = i * TAU / 3; }
+    // the reload animation drives `magMesh` — here that is a spare round shoved up the back
+    this.magMesh = bx(0.09, 0.09, 0.3, 0, -0.16, 0.16, dark, g); this.magY = -0.16;
+    bx(0.05, 0.13, 0.06, 0, -0.11, 0.14, mat, g).rotation.x = 0.3;
+    bx(0.05, 0.1, 0.05, 0, -0.09, -0.42, mat, g);
+    bx(0.11, 0.05, 0.16, 0, 0.09, 0.24, dark, g);                     // shoulder rest
+    // iron ladder sight, high enough to clear the tube
+    frame(0.08, 0.075, 0.012, 0.025, 0, 0.155, -0.2, mat, g); sph(0.0012, 0, 0.155, -0.2, red, g, 5);
+    bx(0.012, 0.055, 0.012, 0, 0.14, -0.75, dark, g);
+    hand(mat, 0.0, -0.13, 0.1, g, [0.5, -0.6, 1]); this.handL = hand(mat, -0.03, -0.11, -0.46, g, [-0.35, -0.9, 0.8]); this.handLPos = this.handL.position.clone();
+    this.muzzle = new THREE.Object3D(); this.muzzle.position.set(0, 0.02, -1.16); g.add(this.muzzle);
+    this.ejectPt = new THREE.Object3D(); g.add(this.ejectPt);
+    this.flash = makeFlash(g, 0, 0.02, -1.16, 1);
+    this.backblast = makeFlash(g, 0, 0.02, 0.66, 1.4);
+  }
+  update(dt, st) {
+    super.update(dt, st);
+    // an empty tube looks empty, and the round slides back in as the reload finishes
+    const loading = this.reloading ? clamp((this.reloadT / this.reloadDur - 0.45) / 0.4, 0, 1) : 1;
+    const in_ = this.mag > 0 || this.reloading;
+    this.warhead.visible = in_;
+    if (in_) this.warhead.position.z = -1.0 - (this.mag > 0 && !this.reloading ? 0 : (1 - loading) * 0.55);
+    if (this.backblast.visible && (this.flashT <= 0)) this.backblast.visible = false;
+  }
+  fire(st) {
+    super.fire(st);
+    this.backblast.visible = true; this.backblast.rotation.z = rand(0, TAU); this.backblast.scale.setScalar(rand(1.6, 2.6));
+    const P = this.ctx.player; this.ctx.effects.smoke(P.eye.clone().addScaledVector(P.forward, -0.2), _v2.copy(P.forward).negate(), 6);
   }
 }
 

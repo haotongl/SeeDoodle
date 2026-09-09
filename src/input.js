@@ -16,6 +16,8 @@ export class Input {
     this.canvas = canvas;
     this.state = {}; this.prev = {}; this.frameState = {};
     this.keys = {}; this.mouseBtns = {};
+    // written by TouchControls (src/touch.js) and read below like any other device
+    this.touchKeys = {}; this.tmove = { x: 0, y: 0 }; this.usingTouch = false;
     this.move = { x: 0, y: 0 };
     this.look = { x: 0, y: 0 };
     this.mx = 0; this.my = 0; this.wheel = 0;
@@ -83,6 +85,7 @@ export class Input {
     const s = this.state;
     for (const k in this.keys) if (this.keys[k]) s[k] = true;
     for (const k in this.mouseBtns) if (this.mouseBtns[k]) s[k] = true;
+    for (const k in this.touchKeys) if (this.touchKeys[k]) s[k] = true;
     if (this.wheel > 0) s.nextWeapon = true; else if (this.wheel < 0) s.prevWeapon = true; this.wheel = 0;
 
     // movement from keys
@@ -115,6 +118,9 @@ export class Input {
       this._pad = pad;
     } else this._pad = null;
     this.padPrev = this.padState; this.padState = padS;
+
+    // a thumb on the stick outranks both: on a phone there is nothing else driving these
+    if (this.tmove.x || this.tmove.y) { mx = this.tmove.x; my = this.tmove.y; }
 
     const ml = Math.hypot(mx, my); if (ml > 1) { mx /= ml; my /= ml; }
     this.move.x = mx; this.move.y = my;

@@ -2,12 +2,13 @@
 import * as THREE from 'three';
 import { makeBody } from './physics.js';
 import { makeInkMaterial, INK } from './render.js';
-import { Rifle, Shotgun, Sniper, Katana } from './weapons.js';
+import { Rifle, Shotgun, Sniper, Katana, Rocket } from './weapons.js';
 // the dome shell and anything else flagged this way cannot be hooked
 const NO_GRAPPLE = (b) => !!b.data.noGrapple;
 const STAM_FIRE = 0.09, STAM_DRAIN = 0.08, STAM_GROUND = 0.4, STAM_AIR = 0.2, STAM_MIN = 0.18, STAM_PAUSE = 0.5, PARRY_WINDOW = 0.55;
 import { clamp, damp, rand, Spring, alignYAxis } from './util.js';
 import { audio } from './audio.js';
+import { OPT_DEFAULTS, diffOf, mobOf, MOB_FULL } from './settings.js';
 
 const G = 26, WALK = 6.6, SPRINT = 10.6, CROUCH = 3.6, ACCEL = 140, FRICTION = 8, AIR_ACCEL = 36, AIR_CAP = 7.5, JUMP = 9.6;
 const STAND_H = 1.75, CROUCH_H = 1.05, EYE_STAND = 1.6, EYE_CROUCH = 0.88;
@@ -16,8 +17,11 @@ const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vecto
 export class Player {
   constructor(ctx) {
     this.ctx = ctx; this.camera = ctx.camera; this.camera.rotation.order = 'YXZ';
+    // The config panel owns this object and edits it in place, so every read below is live. The
+    // fallback is for benches and tools that build a Player without a config attached.
+    this.opt = ctx.opt || (ctx.opt = { ...OPT_DEFAULTS });
     this.body = makeBody(ctx.level.playerStart, 0.35, STAND_H, 0.55);
-    this.yaw = 0; this.pitch = 0; this.maxHp = 120; this.hp = 120; this.alive = true; this.regenDelay = 4.5; this.regenRate = 11; this.nadeCharge = 0; this._nadeHeld = false; this.grapStam = 1; this.blockHeld = 0; this.stamPause = 0;
+    this.yaw = 0; this.pitch = 0; this.maxHp = 120; this.hp = 120; this.alive = true; this.regenDelay = 4.5; this.regenRate = 11; this.maxSprint = 0; this.sprintStam = 0; this.sprintPause = 0; this.sprintLock = false; this.nadeCharge = 0; this._nadeHeld = false; this.grapStam = 1; this.blockHeld = 0; this.stamPause = 0;
     this.eye = new THREE.Vector3(); this.center = new THREE.Vector3(); this.forward = new THREE.Vector3(0, 0, -1); this.right = new THREE.Vector3(1, 0, 0);
     // Where the camera actually ended up last frame, recoil springs and shake included. `forward`
     // is the clean look direction and drives movement; this is the one the crosshair sits on, so
@@ -25,15 +29,18 @@ export class Player {
     this.aimOrigin = new THREE.Vector3(); this.aimFwd = new THREE.Vector3(0, 0, -1); this.aimRight = new THREE.Vector3(1, 0, 0);
     this.speed = 0; this.hurtFx = 0; this.flashFx = 0; this.lastDamageT = 10;
     this.rig = new THREE.Group(); this.camera.add(this.rig); ctx.scene.add(this.camera);
-    this.weapons = [new Rifle(ctx), new Shotgun(ctx), new Sniper(ctx), new Katana(ctx)]; this.katanaIndex = 3;
+    // The rocket goes on the end so every existing index (and `katanaIndex`) is untouched. It
+    // starts `locked`: in the list, but not on the HUD and not reachable until one drops.
+    this.weapons = [new Rifle(ctx), new Shotgun(ctx), new Sniper(ctx), new Katana(ctx), new Rocket(ctx)]; this.katanaIndex = 3; this.rocketIndex = 4;
     for (const w of this.weapons) { this.rig.add(w.root); if (w.isGun) w.startReserve = w.reserve; }
     this.weaponIndex = 0; this.weapon = this.weapons[0]; this.weapon.equip(); this.returnT = 0; this.prevWeaponIndex = 0;
     this.recoilPitch = new Spring(190, 17); this.recoilYaw = new Spring(190, 17); this.fovKick = new Spring(220, 14); this.landDip = new Spring(170, 15);
-    this.roll = 0; this.fov = 82; this.bobPhase = 0; this.bobAmt = 0; this.stepDist = 0; this.eyeH = EYE_STAND;
+    this.roll = 0; this.fov = this.opt.fov; this.bobPhase = 0; this.bobAmt = 0; this.stepDist = 0; this.eyeH = EYE_STAND;
     this.crouching = false; this.sliding = false; this.slideT = 0; this.coyote = 0; this.jumpBuffer = 0; this.wallTouch = 9; this.wallN = new THREE.Vector3(); this.wallJumpCd = 0; this.mantleCd = 0;
     this.dashCd = 0; this.airJumps = 1; this.blockCd = 0; this.landGraceT = 0; this.sprintToggle = false; this.lastGround = true; this.airT = 0; this._sprinting = false; this._aiming = false; this._mv = { x: 0, y: 0 };
     this.grapple = { state: 'idle', anchor: new THREE.Vector3(), hook: new THREE.Vector3(), from: new THREE.Vector3(), flyT: 0, flyDur: 0, len: 0, cd: 0, enemy: null, mover: null, blockedT: 0, t: 0, swingT: 0, hopT: 0 };
-    this.deathT = 0; this.gravityScale = 1; this.dashLock = false;
+    this.deathT = 0; this.gravityScale = 1; this.dashLock = false; this.mob = MOB_FULL;
+    this.recoilAcc = { p: 0, y: 0 }; this.recoilRecT = 0; this.sprintFireLock = 0;
     this.isLocal = true; this.team = 0; this.name = 'you'; this.grenades = 3; this.maxGrenades = 5; this.nades = []; this.nadeCd = 0; this.firing = false; this.onThrow = null;
     const rm = makeInkMaterial({ ink: INK.BLUE, fill: false, shadeBias: -0.3 });
     this.rope = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 6), rm); this.rope.visible = false; ctx.scene.add(this.rope);
@@ -44,15 +51,47 @@ export class Player {
   reset(pos) {
     this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1); this.grapStam = 1; this.blockHeld = 0;
     const b = this.body; b.pos.copy(pos); b.vel.set(0, 0, 0); b.onGround = false; b.height = STAND_H;
+    this.recoilAcc.p = 0; this.recoilAcc.y = 0; this.recoilRecT = 0; this.sprintFireLock = 0;
     this.hp = this.maxHp; this.alive = true; this.yaw = 0; this.pitch = 0; this.roll = 0; this.hurtFx = 0; this.flashFx = 0; this.crouching = false; this.sliding = false; this.deathT = 0; this.lastDamageT = 10; this.dashCd = 0; this.airJumps = 1; this.gravityScale = 1; this.dashLock = false;
     this.detachGrapple(false);
-    for (const w of this.weapons) if (w.isGun) { w.mag = w.magSize; w.reserve = w.startReserve; w.reloading = false; w.pumpT = 0; }
+    for (const w of this.weapons) if (w.isGun) { w.mag = w.magSize; w.reserve = w.startReserve; w.reloading = false; w.pumpT = 0; w.relock(); }
     this.switchTo(0, true); this.rig.visible = true; this.eyeH = EYE_STAND; this.grenades = 3; this.clearNades();
   }
   clearNades() { for (const n of this.nades) this.ctx.scene.remove(n.mesh); this.nades.length = 0; }
   get isBlocking() { return this.weapon.kind === 'katana' && this.weapon.blocking; }
   aimDir(spread = 0) { const d = this.aimFwd.clone(); if (spread > 0) { d.addScaledVector(this.aimRight, rand(-spread, spread)); d.y += rand(-spread, spread); d.normalize(); } return d; }
-  recoil(p, y) { this.pitch = clamp(this.pitch + p * 0.55, -1.5, 1.5); this.recoilPitch.kick(p * 22); this.recoilYaw.kick(y * 30); }
+  // Recoil moves the aim for real - the spring is only the flourish on top - and until now that
+  // displacement was permanent: empty a magazine and your view was left pointing at the sky, with
+  // nothing to do but drag it back by hand. Battlefield's answer is to remember what the gun took
+  // and give it back once the trigger is released, so a burst returns to where it started. What is
+  // remembered is only what actually moved (the pitch clamp can eat some of it), and any of it the
+  // player fights off by pulling down is spent rather than returned - see `_recoilRecover`.
+  recoil(p, y) {
+    // and it levels off: the further the muzzle has already walked, the less each further round
+    // moves it, so a held trigger climbs hard for the first handful and then settles around nine
+    // degrees instead of ending up pointed at the sky. Tapping stays exact, spraying stays fightable.
+    p *= 0.28 + 0.72 * clamp(1 - this.recoilAcc.p / 0.16, 0, 1);
+    const was = this.pitch; this.pitch = clamp(this.pitch + p * 0.55, -1.5, 1.5); this.recoilAcc.p += this.pitch - was;
+    const dy = y * 0.35; this.yaw += dy; this.recoilAcc.y += dy;
+    this.recoilRecT = 0.34;
+    this.recoilPitch.kick(p * 22); this.recoilYaw.kick(y * 30);
+  }
+  // Called with the raw look input, before it is added to the view. Correcting downward against the
+  // climb eats the stored climb first: without this a player who fights the gun by hand gets yanked
+  // below the target the instant they stop firing, which is the single worst thing recovery can do.
+  _recoilFight(dPitch, dYaw) {
+    const a = this.recoilAcc;
+    if (a.p > 0 && dPitch < 0) a.p = Math.max(0, a.p + dPitch);
+    if (a.y > 0 && dYaw < 0) a.y = Math.max(0, a.y + dYaw); else if (a.y < 0 && dYaw > 0) a.y = Math.min(0, a.y + dYaw);
+  }
+  _recoilRecover(dt) {
+    const a = this.recoilAcc; if (!a.p && !a.y) return;
+    if ((this.recoilRecT -= dt) > 0) return;      // a beat of hang time first, so it is not rubber
+    const k = 1 - Math.exp(-8 * dt);
+    const dp = a.p * k, dy = a.y * k; a.p -= dp; a.y -= dy;
+    this.pitch = clamp(this.pitch - dp, -1.5, 1.5); this.yaw -= dy;
+    if (Math.abs(a.p) < 1e-4) a.p = 0; if (Math.abs(a.y) < 1e-4) a.y = 0;
+  }
   kickFov(v) { this.fovKick.kick(v * 30); }
   lunge(speed) {
     const d = this.forward.clone(); d.y = clamp(d.y, -0.2, 0.5); d.normalize(); const b = this.body;
@@ -60,12 +99,31 @@ export class Player {
     audio.dash(); this.kickFov(3);
   }
   switchTo(i, silent = false) {
-    if (i < 0 || i >= this.weapons.length) return; if (i === this.weaponIndex && !silent) return;
+    if (i < 0 || i >= this.weapons.length || this.weapons[i].locked) return; if (i === this.weaponIndex && !silent) return;
     if (this.weapon.kind !== 'katana') this.prevWeaponIndex = this.weaponIndex;
     this.weapon.unequip(); this.weaponIndex = i; this.weapon = this.weapons[i]; this.weapon.equip(); if (!silent) audio.switchWeapon();
     this.ctx.hud.setWeapon(this.weapon.name, this.weapon.hint); this.ctx.hud.setCrosshairMode(this.weapon.kind === 'katana' ? 'katana' : '');
   }
-  addAmmoAll(frac = 0.5) { for (const w of this.weapons) if (w.isGun) w.addAmmo(Math.round(w.maxReserve * frac)); }
+  cycleWeapon(step) {
+    const n = this.weapons.length;
+    for (let k = 1; k <= n; k++) { const i = (this.weaponIndex + step * k + n * n) % n; if (!this.weapons[i].locked) { this.switchTo(i); return; } }
+  }
+  addAmmoAll(frac = 0.5) { for (const w of this.weapons) if (w.isGun && !w.locked) w.addAmmo(Math.round(w.maxReserve * frac)); }
+  // The whole difficulty ladder lands here: how fast and how late you heal, and whether your legs
+  // run out. `sprint: 0` is EASY - unlimited, and the meter never appears.
+  applyDifficulty(key) {
+    const D = this.diff = diffOf(key);
+    this.regenDelay = D.regenDelay; this.regenRate = D.regenRate;
+    this.maxSprint = D.sprint; this.sprintStam = D.sprint; this.sprintPause = 0; this.sprintLock = false;
+    this.ctx.hud.setSprintStamina(D.sprint > 0 ? 1 : null);
+  }
+  // Versus only: how much of the movement kit you are allowed. Every branch below reads `this.mob`,
+  // so this is a live switch - the host can change it between rounds and the next tick obeys.
+  applyMobility(key) {
+    const M = this.mob = key ? mobOf(key) : MOB_FULL;
+    if (!M.grapple && this.grapple.state !== 'idle') this.detachGrapple(false);
+    if (!M.doubleJump) this.airJumps = 0;
+  }
   takeDamage(amount, fromPos) {
     if (!this.alive) return;
     this.hp -= amount; this.lastDamageT = 0; this.hurtFx = Math.min(1, this.hurtFx + amount / 40);
@@ -123,8 +181,21 @@ export class Player {
     }
     this.rig.visible = true;
     // ---- look ----
-    const lookMul = this._aiming ? (this.weapon.scope ? 0.38 : 0.62) : 1;
-    this.yaw += inp.look.x * lookMul; this.pitch = clamp(this.pitch + inp.look.y * lookMul, -1.5, 1.5);
+    // the sight multipliers are the config panel's, and its defaults are the 0.62 / 0.38 that used
+    // to be written here, so an untouched install looks around exactly as it always did
+    const opt = this.opt;
+    const lookMul = this._aiming ? (this.weapon.scope ? opt.scopeSens : opt.adsSens) / 100 : 1;
+    let dYaw = inp.look.x * lookMul, dPitch = inp.look.y * lookMul;
+    if (inp.usingTouch && this.weapon.isGun) {
+      const a = this._aimAssist(dt);
+      if (a) {
+        dYaw *= a.slow; dPitch *= a.slow;
+        if (Math.abs(inp.look.x) + Math.abs(inp.look.y) > 1e-5) { dYaw += a.yaw; dPitch += a.pitch; }
+      }
+    }
+    this._recoilFight(dPitch, dYaw);
+    this.yaw += dYaw; this.pitch = clamp(this.pitch + dPitch, -1.5, 1.5);
+    this._recoilRecover(dt);
     this.forward.set(-Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), -Math.cos(this.yaw) * Math.cos(this.pitch));
     _fwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)); _right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw)); this.right.copy(_right);
     if (this.dashLock) {
@@ -140,13 +211,20 @@ export class Player {
     const aiming = this._aiming = inp.down('aim') && this.weapon.isGun;
     const hspeed = Math.hypot(b.vel.x, b.vel.z);
     const crouchDown = inp.down('crouch');
-    if (inp.pressed('crouch') && b.onGround && hspeed > 6.3 && !this.sliding) this._startSlide(hspeed);
+    if (inp.pressed('crouch') && b.onGround && hspeed > 6.3 && !this.sliding && this.mob.slide) this._startSlide(hspeed);
     if (this.sliding) { this.slideT += dt; if (!crouchDown || hspeed < 3.5 || this.airT > 0.35) this.sliding = false; }
     let wantCrouch = (crouchDown && b.onGround) || this.sliding;
     if (!wantCrouch && this.crouching) { b.height = STAND_H; if (ctx.world.overlapsBody(b)) wantCrouch = true; }
     this.crouching = wantCrouch; b.height = this.crouching ? CROUCH_H : STAND_H;
-    const sprinting = this._sprinting = this.sprintToggle && mv.y > 0.1 && !this.crouching && !aiming;
-    const maxSpeed = this.crouching && !this.sliding ? CROUCH : sprinting ? SPRINT : WALK;
+    const sprinting = this._sprinting = this.sprintToggle && mv.y > 0.1 && !this.crouching && !aiming && !this.sprintLock;
+    // Coming out of a run the gun has to come back up before it will go off. A fifth of a second is
+    // short enough to read as weight rather than as a trigger that ignored you - and it is the thing
+    // that stops a deathmatch being decided by who sprinted around the corner first.
+    this.sprintFireLock = sprinting ? 0.2 : Math.max(0, this.sprintFireLock - dt);
+    // Aiming has never actually slowed you down here, so 100% - the top of the slider - is the old
+    // behaviour. Only the ground-accel branch reads maxSpeed, so a slide keeps its momentum either way.
+    // `mob.speed` is 1 outside versus, so this reads exactly as it always did in solo and co-op.
+    const maxSpeed = (this.crouching && !this.sliding ? CROUCH : sprinting ? SPRINT : WALK) * (aiming ? opt.adsSpeed / 100 : 1) * this.mob.speed;
     this.landGraceT -= dt; this.dashCd -= dt; this.blockCd -= dt;
     // ---- ground / air accel ----
     if (b.onGround) {
@@ -161,7 +239,8 @@ export class Player {
       }
     } else {
       this.coyote -= dt; this.airT += dt;
-      if (wishLen > 0) { const cur = b.vel.x * wish.x + b.vel.z * wish.z; const add = Math.min(AIR_CAP * wishLen - cur, AIR_ACCEL * dt); if (add > 0) { b.vel.x += wish.x * add; b.vel.z += wish.z * add; } }
+      const air = this.mob.air;
+      if (wishLen > 0) { const cur = b.vel.x * wish.x + b.vel.z * wish.z; const add = Math.min(AIR_CAP * air * wishLen - cur, AIR_ACCEL * air * dt); if (add > 0) { b.vel.x += wish.x * add; b.vel.z += wish.z * add; } }
     }
     // ---- jumping / wall jump / air dash ----
     if (inp.pressed('jump')) this.jumpBuffer = 0.15; else this.jumpBuffer -= dt;
@@ -170,25 +249,25 @@ export class Player {
     if (this.jumpBuffer > 0) {
       if (this.grapple.state === 'on') { this.jumpBuffer = 0; this.detachGrapple(true); }
       else if (b.onGround || this.coyote > 0) {
-        this.jumpBuffer = 0; this.coyote = 0; b.vel.y = JUMP; b.onGround = false; this.airJumps = 1;
+        this.jumpBuffer = 0; this.coyote = 0; b.vel.y = JUMP * this.mob.jump; b.onGround = false; this.airJumps = this.mob.doubleJump ? 1 : 0;
         if (this.sliding) { b.vel.x *= 1.06; b.vel.z *= 1.06; this.sliding = false; }
         audio.jump(); this.landDip.kick(-1.2);
-      } else if (this.wallTouch < 0.12 && this.wallJumpCd <= 0 && b.vel.y < 7) {
+      } else if (this.wallTouch < 0.12 && this.wallJumpCd <= 0 && b.vel.y < 7 && this.mob.wallJump) {
         this.jumpBuffer = 0; this.wallJumpCd = 0.35; const n = this.wallN;
-        b.vel.x = n.x * 7.5 + b.vel.x * 0.35 + _fwd.x * 2.5; b.vel.z = n.z * 7.5 + b.vel.z * 0.35 + _fwd.z * 2.5; b.vel.y = 9.2;
+        b.vel.x = n.x * 7.5 + b.vel.x * 0.35 + _fwd.x * 2.5; b.vel.z = n.z * 7.5 + b.vel.z * 0.35 + _fwd.z * 2.5; b.vel.y = 9.2 * this.mob.jump;
         audio.wallJump(); this.roll += n.dot(_right) > 0 ? -0.1 : 0.1; this.kickFov(2); this.landDip.kick(-1.5);
-        this.airJumps = 1;
-      } else if (this.airJumps > 0) {
+        this.airJumps = this.mob.doubleJump ? 1 : 0;
+      } else if (this.airJumps > 0 && this.mob.doubleJump) {
         // double jump: a second beat of height, and it redirects toward where you are steering
         this.jumpBuffer = 0; this.airJumps--;
-        b.vel.y = JUMP * 0.92;
+        b.vel.y = JUMP * 0.92 * this.mob.jump;
         if (wishLen > 0) { const cur = b.vel.x * wish.x + b.vel.z * wish.z; const add = Math.max(0, 7.5 * wishLen - cur); b.vel.x += wish.x * add; b.vel.z += wish.z * add; }
         audio.jump(); this.kickFov(1.6); this.landDip.kick(-1.4);
         _v2.copy(this.center); _v2.y -= 0.7;
         this.ctx.effects.strokeBurst(_v2, INK.BLUE, 9, 4.5, { life: 0.28, size: 0.028, gravity: -2 });
       }
     }
-    if ((inp.pressed('dash') || (inp.pressed('crouch') && !b.onGround)) && !b.onGround && this.dashCd <= 0 && this.grapple.state !== 'on') this._dash(wishLen > 0 ? wish : _fwd);
+    if ((inp.pressed('dash') || (inp.pressed('crouch') && !b.onGround)) && !b.onGround && this.dashCd <= 0 && this.grapple.state !== 'on' && this.mob.dash) this._dash(wishLen > 0 ? wish : _fwd);
     // ---- gravity, grapple, mantle, integrate ----
     b.vel.y -= G * this.gravityScale * (this.grapple.state === 'on' ? 0.88 : 1) * dt;
     this._updateGrapple(dt);
@@ -207,7 +286,20 @@ export class Player {
     }
     this.lastGround = b.onGround;
     // ---- regen, bob, footsteps ----
-    if (this.lastDamageT > this.regenDelay && this.hp < this.maxHp && !this._sprinting && this.grapple.state === 'idle') this.hp = Math.min(this.maxHp, this.hp + this.regenRate * dt);
+    if (this.regenRate > 0 && this.lastDamageT > this.regenDelay && this.hp < this.maxHp && !this._sprinting && this.grapple.state === 'idle') this.hp = Math.min(this.maxHp, this.hp + this.regenRate * dt);
+    // ---- sprint stamina (MEDIUM and up; maxSprint 0 means EASY and this whole block is off) ----
+    if (this.maxSprint > 0) {
+      const D = this.diff;
+      if (this._sprinting) {
+        this.sprintStam -= dt; this.sprintPause = D.sprintPause;
+        if (this.sprintStam <= 0) { this.sprintStam = 0; this.sprintLock = true; this.sprintToggle = false; ctx.hud.tip('out of breath · walk it off', 1.2); }
+      } else if ((this.sprintPause -= dt) <= 0) {
+        this.sprintStam = Math.min(this.maxSprint, this.sprintStam + this.maxSprint * D.sprintRegen * dt);
+        // a third of the tank back before the legs unlock, so an empty meter is not a one-step stutter
+        if (this.sprintLock && this.sprintStam > this.maxSprint * 0.3) this.sprintLock = false;
+      }
+      ctx.hud.setSprintStamina(this.sprintStam / this.maxSprint);
+    }
     this.blockHeld = this.isBlocking ? this.blockHeld + dt : 0;
     // the grapple runs on breath: hanging drains it, feet on the ground bring it back fast
     this.stamPause -= dt;
@@ -226,8 +318,9 @@ export class Player {
     this.updateNades(dt);
     // ---- weapons ----
     for (let i = 0; i < 5; i++) if (inp.pressed('slot' + (i + 1))) this.switchTo(Math.min(i, this.weapons.length - 1));
-    if (inp.pressed('nextWeapon')) this.switchTo((this.weaponIndex + 1) % this.weapons.length);
-    if (inp.pressed('prevWeapon')) this.switchTo((this.weaponIndex + this.weapons.length - 1) % this.weapons.length);
+    // the wheel steps over anything still locked rather than stopping dead on it
+    if (inp.pressed('nextWeapon')) this.cycleWeapon(1);
+    if (inp.pressed('prevWeapon')) this.cycleWeapon(-1);
     const st = this._weaponState(sprinting, aiming, hs2);
     if (inp.pressed('melee') && this.weapon.kind !== 'katana') { this.switchTo(this.katanaIndex); this.returnT = 0.85; this.weapons[this.katanaIndex].startSlash(st); st.meleePressed = false; }
     if (this.returnT > 0) { if (this.weapon.kind === 'katana' && (st.firePressed || st.aim || st.meleePressed)) this.returnT = 0; else { this.returnT -= dt; if (this.returnT <= 0) this.switchTo(this.prevWeaponIndex); } }
@@ -298,22 +391,25 @@ export class Player {
       if (n.fuse <= 0) { this.explodeNade(n); ctx.scene.remove(n.mesh); this.nades.splice(i, 1); }
     }
   }
-  explodeNade(n) {
-    const ctx = this.ctx, R = 6.4, c = n.pos.clone(); c.y += 0.25;
-    ctx.effects.boom(c, R); audio.explosion(c); ctx.input.rumble(0.9, 0.9, 220);
-    // bots: the thrower's client reports the damage (host applies it; a client's report is forwarded)
-    if (n.mine) ctx.enemies.blastEnemies(c, R, 120, null);
-    if (n.mine && ctx.blastBreakables) ctx.blastBreakables(c, R);
-    // me: my own grenade, or anyone else's that went off on my screen
+  // One blast, whatever set it off. `mine` is the authority question and not a cosmetic one: the
+  // client that owns the thing decides what it did to bots, props and other players, while everyone
+  // sees the boom and everyone's own body takes its own damage from it locally.
+  explode(pos, o = {}) {
+    const ctx = this.ctx, R = o.R || 6.4, hurtR = R * 0.95, c = pos.clone(); c.y += o.lift === undefined ? 0.25 : o.lift;
+    ctx.effects.boom(c, R); audio.explosion(c); ctx.input.rumble(0.9, 0.9, 220); ctx.effects.shakeAmt += 0.1 + R * 0.03;
+    const mine = o.mine !== false;
+    if (mine) { ctx.enemies.blastEnemies(c, R, o.enemyDmg || 120, null); if (ctx.blastBreakables) ctx.blastBreakables(c, R); }
+    // me: my own explosion, or anyone else's that went off on my screen
     const d = this.center.distanceTo(c);
-    if (this.alive && d < R * 0.95) { this.takeDamage(10 + 34 * (1 - d / (R * 0.95)), c); this.knockback(_v.subVectors(this.center, c).normalize(), 9); }
-    // other players in a versus match, decided by the thrower only
-    if (n.mine && ctx.targets) for (const t of ctx.targets()) { if (t.isLocal || !t.alive || (ctx.canHurt && !ctx.canHurt(t))) continue; const dd = t.center.distanceTo(c); if (dd < R * 0.95) t.takeDamage(12 + 50 * (1 - dd / (R * 0.95)), c); }
+    if (this.alive && d < hurtR) { this.takeDamage((o.selfBase ?? 10) + (o.selfMax ?? 34) * (1 - d / hurtR), c); this.knockback(_v.subVectors(this.center, c).normalize(), o.push || 9); }
+    // other players in a versus match, decided by whoever set it off
+    if (mine && ctx.targets) for (const t of ctx.targets()) { if (t.isLocal || !t.alive || (ctx.canHurt && !ctx.canHurt(t))) continue; const dd = t.center.distanceTo(c); if (dd < hurtR) t.takeDamage((o.pvpBase ?? 12) + (o.pvpMax ?? 50) * (1 - dd / hurtR), c); }
   }
+  explodeNade(n) { this.explode(n.pos, { mine: n.mine }); }
   _weaponState(sprinting, aiming, hs) {
     const inp = this.ctx.input, b = this.body;
     return { fire: inp.down('fire'), firePressed: inp.pressed('fire'), aim: aiming || (inp.down('aim') && this.weapon.kind === 'katana'), reloadPressed: inp.pressed('reload'), meleePressed: inp.pressed('melee') && this.weapon.kind === 'katana',
-      sprinting, grounded: b.onGround, speed: hs, sliding: this.sliding, lookDelta: inp.look, strafe: this._mv.x, bobPhase: this.bobPhase, bobAmt: this.bobAmt, landDip: clamp(-this.landDip.value * 0.08, -0.5, 0.5), slideTilt: this.sliding ? 1 : 0, blockFire: !this.alive };
+      sprinting, grounded: b.onGround, speed: hs, sliding: this.sliding, lookDelta: inp.look, strafe: this._mv.x, bobPhase: this.bobPhase, bobAmt: this.bobAmt, landDip: clamp(-this.landDip.value * 0.08, -0.5, 0.5), slideTilt: this.sliding ? 1 : 0, blockFire: !this.alive || this.sprintFireLock > 0 };
   }
   _startSlide(hs) {
     this.sliding = true; this.slideT = 0; const b = this.body; const boost = clamp(12.8 - hs, 0, 4.5);
@@ -335,6 +431,39 @@ export class Player {
     b.vel.y = Math.min(11, Math.sqrt(2 * G * (dy + 0.45))); b.vel.x = fwd.x * 3.2; b.vel.z = fwd.z * 3.2; this.mantleCd = 0.7; audio.mantle(); this.landDip.kick(-2.5); this.kickFov(1.5);
   }
   _handPos(out) { out.copy(this.eye).addScaledVector(this.right, -0.55).addScaledVector(this.forward, 0.9); out.y -= 0.42; return out; }
+  // Aim assist, touch only. Two small effects, both deliberately weak: near a target the drag slows
+  // down, and while a thumb is actually moving the view it drifts toward them a little. The pull
+  // rides on the drag, so a reticle left alone never creeps onto anyone by itself - a thumb has no
+  // wrist behind it, and this is meant to take the edge off that, not to do the aiming.
+  _aimAssist(dt) {
+    const ctx = this.ctx, o = this.aimOrigin, d = this.aimFwd;
+    const CONE = 0.105, MAXD = 90;                     // about six degrees of help, and no further
+    let best = null, bestAng = CONE;
+    const consider = (c, los) => {
+      _v.subVectors(c, o); const t = _v.dot(d);
+      if (t < 1.5 || t > MAXD) return;
+      const ang = Math.acos(clamp(t / Math.max(1e-4, _v.length()), -1, 1));
+      if (ang >= bestAng) return;
+      if (los && !ctx.world.hasLineOfSight(o, c)) return;
+      bestAng = ang; best = c;
+    };
+    for (const e of ctx.enemies.enemies) if (e.alive && e.state !== 'spawn') consider(e.center, true);
+    // playersInArc has already done line of sight and the friend/foe check
+    if (ctx.playersInArc) for (const p of ctx.playersInArc(o, d, MAXD, Math.cos(CONE))) consider(p.center, false);
+    if (!best) return null;
+    const aa = this.opt.aimAssist / 100;
+    const w = 1 - bestAng / CONE;                      // 1 dead on the target, 0 at the edge of the cone
+    _v.subVectors(best, o).normalize();
+    const ty = Math.atan2(-_v.x, -_v.z), tp = Math.asin(clamp(_v.y, -1, 1));
+    const TAU = Math.PI * 2;
+    let dy = ty - this.yaw; dy -= Math.round(dy / TAU) * TAU;   // shortest way round
+    const k = Math.min(1, 2.4 * dt) * w * w * 0.5;
+    // The slow is deliberately shallow. Halving the look speed over a target does help a thumb hold
+    // still, but it also reads as the screen catching on something, and scoped it stacked with the
+    // 0.38 sight multiplier down to a fifth of the drag - which feels broken, not helpful.
+    return { slow: 1 - 0.28 * w * w * Math.min(1, aa), yaw: dy * k * aa, pitch: (tp - this.pitch) * k * aa };
+  }
+
   // What the crosshair is on wins. Enemies and rings only get a small amount of assist, and
   // only when they are genuinely near the aim line and not behind whatever you are pointing at,
   // so the hook stops jumping to rings above your head that you never aimed at.
@@ -385,13 +514,16 @@ export class Player {
     audio.grappleFire(); this.ctx.input.rumble(0.15, 0.4, 40); this.weapon.recoil.kick(-0.3, 0.2, 0.5);
   }
   detachGrapple(boost) {
-    const g = this.grapple; if (g.state === 'idle') return; const was = g.state; g.state = 'idle'; g.cd = 0.12; g.enemy = null; g.mover = null; this.stamPause = STAM_PAUSE;
+    const g = this.grapple; if (g.state === 'idle') return; const was = g.state; g.state = 'idle'; g.cd = Math.max(0.12, this.mob.grapCd); g.enemy = null; g.mover = null; this.stamPause = STAM_PAUSE;
     this.rope.visible = false; this.hookMesh.visible = false; audio.reelLoop(false); this.ctx.hud.grappleTarget(0);
     if (was === 'on') { const b = this.body; if (boost) { b.vel.y = Math.max(b.vel.y, 0) + 8; b.vel.x *= 1.12; b.vel.z *= 1.12; audio.jump(); this.kickFov(3); } else { b.vel.y += 2.5; audio.grappleRelease(); } }
   }
   _updateGrapple(dt) {
     const g = this.grapple, inp = this.ctx.input, b = this.body, ctx = this.ctx; g.cd -= dt;
     if (g.state === 'idle') {
+      // On HARD there is no hook at all, so don't even paint the target ring: a reticle that lights
+      // up on something you cannot reach is worse than no reticle.
+      if (!this.mob.grapple) { if (inp.pressed('grapple')) { audio.empty(); ctx.hud.tip('no grapple in this match', 0.9); } ctx.hud.grappleTarget(0); return; }
       if (inp.pressed('grapple') && g.cd <= 0) this._fireGrapple();
       g.t += dt; if (g.t > 0.08) { g.t = 0; ctx.hud.grappleTarget(this._findGrappleTarget() ? 1 : 0); }
     } else if (g.state === 'fly') {
@@ -430,14 +562,15 @@ export class Player {
     const targetEye = this.crouching ? EYE_CROUCH : EYE_STAND; this.eyeH = this.alive ? damp(this.eyeH, targetEye, 14, dt) : this.eyeH;
     this.recoilPitch.update(dt); this.recoilYaw.update(dt); this.fovKick.update(dt); this.landDip.update(dt);
     if (this.alive) this.roll = damp(this.roll, -mv.x * 0.022 + (this.sliding ? -0.08 : 0), 9, dt);
-    const sh = this.ctx.effects.shakeAmt; this.ctx.effects.shakeAmt = damp(sh, 0, 7, dt); const shk = Math.min(sh, 1.2);
-    const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.03 * this.bobAmt, bobX = Math.cos(this.bobPhase * 0.5) * 0.018 * this.bobAmt;
+    const sh = this.ctx.effects.shakeAmt; this.ctx.effects.shakeAmt = damp(sh, 0, 7, dt); const shk = Math.min(sh, 1.2) * this.opt.shake / 100;
+    const bobAmt = this.bobAmt * this.opt.bob / 100;
+    const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.03 * bobAmt, bobX = Math.cos(this.bobPhase * 0.5) * 0.018 * bobAmt;
     this.eye.set(b.pos.x, b.pos.y + this.eyeH + this.landDip.value * 0.07 + bobY, b.pos.z);
     this.center.set(b.pos.x, b.pos.y + b.height * 0.55, b.pos.z);
     cam.position.copy(this.eye).addScaledVector(this.right, bobX + (Math.random() - 0.5) * shk * 0.07); cam.position.y += (Math.random() - 0.5) * shk * 0.07;
     const aimP = this.pitch + this.recoilPitch.value + (Math.random() - 0.5) * shk * 0.035;
     const aimY = this.yaw + this.recoilYaw.value + (Math.random() - 0.5) * shk * 0.035;
-    cam.rotation.set(aimP, aimY, this.roll + Math.sin(this.bobPhase * 0.5) * 0.004 * this.bobAmt);
+    cam.rotation.set(aimP, aimY, this.roll + Math.sin(this.bobPhase * 0.5) * 0.004 * bobAmt);
     // The gun fires along this, not along `forward`: same pitch and yaw the camera was just given,
     // so whatever the crosshair is covering is what the ray hits. (Euler order is YXZ, and the
     // roll term is a rotation about the view axis, so neither of them bends this direction.)
@@ -445,7 +578,7 @@ export class Player {
     this.aimFwd.set(-Math.sin(aimY) * Math.cos(aimP), Math.sin(aimP), -Math.cos(aimY) * Math.cos(aimP));
     this.aimRight.set(Math.cos(aimY), 0, -Math.sin(aimY));
     const sp3 = b.vel.length();
-    let fov = 82 + clamp((sp3 - 7) / 16, 0, 1) * 8 + (this._sprinting ? 3 : 0) + (this.sliding ? 4 : 0) + (this.grapple.state === 'on' ? 3 : 0) + this.fovKick.value;
+    let fov = this.opt.fov + clamp((sp3 - 7) / 16, 0, 1) * 8 + (this._sprinting ? 3 : 0) + (this.sliding ? 4 : 0) + (this.grapple.state === 'on' ? 3 : 0) + this.fovKick.value;
     if (this._aiming) fov = this.weapon.adsFov;
     this.fov = damp(this.fov, fov, this._aiming ? 16 : 8, dt); if (Math.abs(cam.fov - this.fov) > 0.01) { cam.fov = this.fov; cam.updateProjectionMatrix(); }
     this.hurtFx = damp(this.hurtFx, 0, 3, dt); this.flashFx = damp(this.flashFx, 0, 10, dt); this.speed = sp3;

@@ -2,8 +2,8 @@
 html, body { margin: 0; height: 100%; overflow: hidden; background: var(--paper); font-family: 'Patrick Hand', 'Caveat', 'Comic Sans MS', 'Marker Felt', 'Segoe Print', cursive; }
 canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
 #hud { position: fixed; inset: 0; pointer-events: none; color: var(--ink); user-select: none; overflow: hidden; }
-.hud-tl, .hud-tr, .hud-bl, .hud-br, .crosshair, .grapple-ret, .hitmarker, .dmg-ind, .message, .killfeed { mix-blend-mode: multiply; }
-#hud.nogame .hud-tl, #hud.nogame .hud-tr, #hud.nogame .hud-bl, #hud.nogame .hud-br, #hud.nogame .crosshair, #hud.nogame .grapple-ret, #hud.nogame .killfeed { display: none; }
+.hud-tl, .hud-tr, .hud-bl, .hud-br, .crosshair, .cyc, .grapple-ret, .hitmarker, .dmg-ind, .message, .killfeed { mix-blend-mode: multiply; }
+#hud.nogame .hud-tl, #hud.nogame .hud-tr, #hud.nogame .hud-bl, #hud.nogame .hud-br, #hud.nogame .crosshair, #hud.nogame .cyc, #hud.nogame .grapple-ret, #hud.nogame .killfeed { display: none; }
 .hud-tl { position: absolute; left: 9%; top: 3%; font-size: 30px; transform: rotate(-1.5deg); }
 .hud-tr { position: absolute; right: 4%; top: 3%; text-align: right; font-size: 30px; transform: rotate(1deg); }
 .hud-bl { position: absolute; left: 9%; bottom: 5%; }
@@ -13,6 +13,10 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .tally i { display: block; width: 4px; height: 20px; background: var(--ink); transform: rotate(4deg); border-radius: 2px; opacity: .9; }
 .tally i:nth-child(5n) { width: 4px; margin-right: 10px; transform: rotate(-8deg); }
 .health { margin-bottom: 8px; font-size: 26px; display: flex; align-items: center; gap: 10px; }
+/* the run meter, only drawn above EASY - same pen as the health bar, half the weight so it reads as secondary */
+.stam { margin: -4px 0 8px; font-size: 14px; display: flex; align-items: center; gap: 10px; opacity: .85; }
+.stam .bar { height: 8px; border-width: 2px; transform: rotate(-.6deg); }
+
 .bar { width: 210px; height: 16px; border: 2.5px solid var(--ink); border-radius: 6px 8px 5px 7px / 8px 5px 7px 6px; overflow: hidden; transform: rotate(-1deg); }
 .fill { height: 100%; width: 100%; background: repeating-linear-gradient(-55deg, var(--ink) 0 2.5px, transparent 2.5px 6px); transition: width .15s; }
 .low .bar { border-color: var(--red); } .low .fill { background: repeating-linear-gradient(-55deg, var(--red) 0 2.5px, transparent 2.5px 6px); }
@@ -25,7 +29,18 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .ch-dot { width: 3px; height: 3px; left: -1.5px; top: -1.5px; border-radius: 50%; }
 .crosshair.katana i { background: var(--ink); } .crosshair.katana .ch-t, .crosshair.katana .ch-b { height: 16px; }
 .crosshair.katana .ch-l, .crosshair.katana .ch-r { display: none; }
-.grapple-ret { position: absolute; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px; border: 2.5px dashed var(--ink); border-radius: 50%; opacity: 0; transition: opacity .1s, transform .12s; transform: scale(1.6) rotate(0deg); }
+/* cycle ring: a dashed circle just outside the crosshair arms, inked in as a pump or a reload runs
+   out. Sibling of .crosshair on purpose - .crosshair.ads hides itself when you scope in, and the
+   scoped sniper is exactly the case that has no other feedback, since its model is hidden too. */
+.cyc { position: absolute; left: 50%; top: 50%; width: 60px; height: 60px; margin: -30px; --p: 0; }
+.cyc::before { content: ''; position: absolute; inset: 0; border: 2px dashed var(--ink); border-radius: 50%; opacity: .28; }
+.cyc i { position: absolute; inset: 0; border-radius: 50%; transform: rotate(-2deg); opacity: .9;
+  background: conic-gradient(var(--ink) calc(var(--p) * 1turn), transparent 0);
+  -webkit-mask: radial-gradient(circle, transparent 0 26px, #000 26.5px 30px);
+          mask: radial-gradient(circle, transparent 0 26px, #000 26.5px 30px); }
+.cyc.reload::before { border-color: var(--red); }
+.cyc.reload i { background: conic-gradient(var(--red) calc(var(--p) * 1turn), transparent 0); }
+.grapple-ret { box-sizing: border-box; position: absolute; left: 50%; top: 50%; width: 30px; height: 30px; margin: -15px; border: 2.5px dashed var(--ink); border-radius: 50%; opacity: 0; transition: opacity .1s, transform .12s; transform: scale(1.6) rotate(0deg); }
 .grapple-ret.on { opacity: .9; transform: scale(1) rotate(20deg); } .grapple-ret.attached { border-style: solid; transform: scale(.65); }
 .hitmarker { position: absolute; left: 50%; top: 50%; opacity: 0; }
 .hitmarker i { position: absolute; width: 3.5px; height: 36px; background: #e8801a; left: -1.75px; top: -18px; border-radius: 2px; box-shadow: 0 0 0 1px rgba(250,248,238,.85); }
@@ -47,7 +62,7 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 @keyframes di { to { opacity: 0; } }
 .screen { position: absolute; inset: 0; display: none; align-items: center; justify-content: center; pointer-events: auto; cursor: pointer; background: rgba(246, 243, 230, .55); }
 .screen.show { display: flex; }
-.panel { text-align: center; max-width: 980px; padding: 26px 48px; background: rgba(250, 248, 238, .93); box-shadow: 6px 6px 0 rgba(26, 48, 192, .15); border: 3px solid var(--ink); border-radius: 12px 18px 10px 16px / 16px 10px 18px 12px; transform: rotate(-.6deg); }
+.panel { box-sizing: border-box; text-align: center; max-width: 980px; max-height: 100%; overflow-y: auto; padding: 26px 48px; background: rgba(250, 248, 238, .93); box-shadow: 6px 6px 0 rgba(26, 48, 192, .15); border: 3px solid var(--ink); border-radius: 12px 18px 10px 16px / 16px 10px 18px 12px; transform: rotate(-.6deg); }
 .panel h1 { font-size: 92px; margin: 0; letter-spacing: 3px; line-height: 1; }
 .panel h2 { font-size: 36px; margin: 4px 0 14px; font-weight: normal; }
 .panel .cols { display: flex; gap: 46px; justify-content: center; text-align: left; font-size: 22px; line-height: 1.35; }
@@ -58,7 +73,9 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .weapon { font-size: 36px; } .hint { font-size: 20px; opacity: .8; }
 .combo { font-size: 26px; color: var(--red); min-height: 30px; }
 .timer { font-size: 24px; color: var(--red); }
-@media (max-width: 900px) { .panel h1 { font-size: 56px; } .panel .cols { flex-direction: column; gap: 10px; font-size: 18px; } .msg-main { font-size: 56px; } }
+@media (max-width: 900px) { .panel h1 { font-size: 56px; } .panel .cols { flex-direction: column; gap: 10px; font-size: 18px; } .msg-main { font-size: 56px; }
+  /* one column of settings rather than three, and the row keeps its shape by giving up label width */
+  .config { gap: 6px; } .cfgcol { min-width: 0; width: 100%; } }
 /* v2 additions */
 .crosshair.ads { opacity: 0; }
 .slots { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; margin-bottom: 6px; font-size: 20px; opacity: .85; }
@@ -76,20 +93,50 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .tip.show { opacity: .9; }
 .tip b { color: var(--red); }
 #hud.nogame .tip, #hud.nogame .bossbar { display: none; }
-.settings { display: flex; flex-direction: column; gap: 4px; align-items: center; font-size: 21px; margin-top: 12px; border-top: 2px solid var(--ink); padding-top: 10px; }
-.settings label { display: flex; align-items: center; gap: 8px; cursor: pointer; }
-.settings input[type=range] { width: 220px; accent-color: #1a30c0; }
-.settings input[type=checkbox] { width: 17px; height: 17px; accent-color: #1a30c0; }
-.settings b { color: var(--red); min-width: 56px; text-align: left; }
-.settings .k { opacity: .6; font-size: 17px; }
+/* the door into the config screen, sitting where the settings stack used to */
+.settings { display: flex; justify-content: center; margin-top: 12px; border-top: 2px solid var(--ink); padding-top: 10px; }
+.cfgopen { font: inherit; font-size: 24px; color: var(--ink); background: transparent; border: 2.5px solid var(--ink); border-radius: 7px 11px 6px 10px / 11px 6px 10px 7px; padding: 5px 22px; cursor: pointer; transform: rotate(-.5deg); line-height: 1.1; opacity: .8; }
+.cfgopen i { display: block; font-style: normal; font-size: 15px; opacity: .7; }
+.cfgopen:hover { opacity: 1; color: var(--paper); background: var(--ink); }
+
+/* ---- the config screen ---------------------------------------------------------------------- */
+/* Three columns of rows, each row a name, a slider and the number it is on. The number is red and
+   fixed-width so a column of them reads as a column - that is the thing you actually scan when you
+   come back in to nudge one setting. */
+.config { display: flex; gap: 30px; justify-content: center; flex-wrap: wrap; text-align: left; margin: 8px 0 4px; }
+.cfgcol { display: flex; flex-direction: column; gap: 7px; min-width: 300px; }
+.cfghead { font-size: 24px; border-bottom: 2px solid var(--ink); margin-bottom: 2px; letter-spacing: 1px; }
+.cfgrow { display: grid; grid-template-columns: 1fr 130px 52px; align-items: center; gap: 10px; font-size: 20px; cursor: pointer; }
+.cfgrow .cfgname { line-height: 1.05; }
+.cfgrow .cfgname i { display: block; font-style: normal; font-size: 14px; opacity: .62; line-height: 1.15; }
+.cfgrow input[type=range] { width: 130px; accent-color: #1a30c0; }
+.cfgrow b { color: var(--red); text-align: right; font-variant-numeric: tabular-nums; }
+.cfgrow.chk, .cfgrow.lang, .cfgrow.seg { display: flex; gap: 9px; align-items: center; }
+.cfgrow.seg { flex-wrap: wrap; }
+/* the line under the difficulty buttons that spells out what the selected rung costs you */
+.cfgnote { font-size: 15px; opacity: .68; margin: -3px 0 2px; line-height: 1.2; }
+.cfgrow input[type=checkbox] { width: 18px; height: 18px; accent-color: #1a30c0; flex: none; }
+.cfgfoot { margin-top: 12px; border-top: 2px solid var(--ink); padding-top: 10px; }
+/* a working screen, not a title card: the heading gives its room back to the rows, which is what
+   keeps the whole panel inside a 640px-tall laptop window without scrolling */
+.panel:has(.config) { padding: 16px 30px; }
+.panel:has(.config) h1 { font-size: 54px; }
+.panel:has(.config) h2 { font-size: 21px; margin: 2px 0 8px; opacity: .8; }
+.langsel { display: flex; gap: 6px; }
+.langbtn { font: inherit; font-size: 17px; color: var(--ink); background: transparent; border: 2px solid var(--ink); border-radius: 6px 9px 5px 8px / 9px 5px 8px 6px; padding: 1px 9px; cursor: pointer; opacity: .5; transform: rotate(-.4deg); }
+.langbtn:nth-child(2) { transform: rotate(.5deg); }
+.langbtn:hover { opacity: .8; }
+.langbtn.on { opacity: 1; color: var(--paper); background: var(--ink); }
 .beststat { font-size: 22px; opacity: .8; margin-top: 4px; }
 /* sniper scope */
 .scope { position: absolute; inset: 0; opacity: 0; transition: opacity .1s; pointer-events: none; }
 .scope.on { opacity: 1; }
 .scope .mask { position: absolute; inset: 0; background: radial-gradient(circle at 50% 50%, rgba(246,243,230,0) 0 30vh, var(--paper) 30.6vh 100%); }
-.scope .ring { position: absolute; left: 50%; top: 50%; width: 60.5vh; height: 60.5vh; margin: -30.25vh; border: 3.5px solid var(--ink); border-radius: 50%; box-shadow: inset 0 0 0 7px rgba(26,48,192,.12); }
-.scope .cx { position: absolute; left: 50%; top: 50%; width: 60vh; height: 2.5px; margin: -1px -30vh; background: repeating-linear-gradient(90deg, var(--ink) 0 14px, transparent 14px 17px); }
-.scope .cy { position: absolute; left: 50%; top: 50%; width: 2.5px; height: 60vh; margin: -30vh -1px; background: repeating-linear-gradient(180deg, var(--ink) 0 14px, transparent 14px 17px); }
+/* box-sizing matters here: without it the 3.5px border sits outside the 60.5vh box, so the drawn
+   circle ends up 3.5px right of and below the red dot, which is placed on the true centre. */
+.scope .ring { box-sizing: border-box; position: absolute; left: 50%; top: 50%; width: 60.5vh; height: 60.5vh; margin: -30.25vh; border: 3.5px solid var(--ink); border-radius: 50%; box-shadow: inset 0 0 0 7px rgba(26,48,192,.12); }
+.scope .cx { position: absolute; left: 50%; top: 50%; width: 60vh; height: 2.5px; margin: -1.25px -30vh; background: repeating-linear-gradient(90deg, var(--ink) 0 14px, transparent 14px 17px); }
+.scope .cy { position: absolute; left: 50%; top: 50%; width: 2.5px; height: 60vh; margin: -30vh -1.25px; background: repeating-linear-gradient(180deg, var(--ink) 0 14px, transparent 14px 17px); }
 .scope .dot { position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; margin: -2.5px; background: var(--red); border-radius: 50%; }
 /* focus-slash target marker */
 .focus-mark { position: absolute; left: 0; top: 0; width: 0; height: 0; opacity: 0; transition: opacity .1s; }
@@ -196,11 +243,17 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .online .plist { min-width: 340px; }
 .online .plist .host span:first-child::after { content: ' · host'; opacity: .6; font-size: 16px; }
 .online .plist .me { background: rgba(26,48,192,.08); }
-.board { position: absolute; left: 50%; top: 18%; transform: translateX(-50%) rotate(-.5deg); background: rgba(250,247,238,.94); border: 3px solid var(--ink); border-radius: 12px 16px 10px 14px / 14px 10px 16px 12px; padding: 12px 22px; min-width: 380px; font-size: 24px; color: var(--ink); z-index: 5; }
+.board { position: absolute; left: 50%; top: 18%; transform: translateX(-50%) rotate(-.5deg); background: rgba(250,247,238,.94); border: 3px solid var(--ink); border-radius: 12px 16px 10px 14px / 14px 10px 16px 12px; padding: 12px 22px; min-width: 470px; font-size: 24px; color: var(--ink); z-index: 5; }
 .board h3 { margin: 0 0 6px; font-size: 30px; text-align: center; letter-spacing: 2px; }
 .board div { display: flex; justify-content: space-between; gap: 24px; padding: 2px 8px; border-bottom: 1.5px solid rgba(26,48,192,.25); }
 .board div.me { background: rgba(26,48,192,.1); }
 .board .foot { font-size: 16px; opacity: .7; justify-content: center; border: 0; margin-top: 6px; }
+/* the ping column: score is what you came to read, so this sits quietly to the right of it */
+.board .tail { margin-left: auto; }
+.board .pg { font-style: normal; min-width: 82px; text-align: right; opacity: .7; }
+.board .pg small { font-size: 15px; opacity: .7; }
+.board .pg.good { color: #1a7a3c; }
+.board .pg.bad { color: var(--red); opacity: .95; }
 .feed { color: var(--red); }
 
 /* live mini leaderboard in the corner during online play */
@@ -214,7 +267,7 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .pvpscore .row.down { opacity: .45; text-decoration: line-through; }
 
 /* grapple breath: a sliver under the crosshair, only while it is not full */
-.gstam { position: absolute; left: 50%; top: 50%; width: 64px; height: 5px; margin-left: -32px; margin-top: 26px; border: 1.5px solid var(--ink); border-radius: 3px; opacity: .8; mix-blend-mode: multiply; }
+.gstam { box-sizing: border-box; position: absolute; left: 50%; top: 50%; width: 64px; height: 5px; margin-left: -32px; margin-top: 26px; border: 1.5px solid var(--ink); border-radius: 3px; opacity: .8; mix-blend-mode: multiply; }
 .gstam i { display: block; height: 100%; background: var(--ink); }
 .gstam.low { border-color: var(--red); } .gstam.low i { background: var(--red); }
 
@@ -224,3 +277,133 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .lobbyrow { display: grid; grid-template-columns: 96px 1fr auto auto; gap: 12px; align-items: center; font-size: 19px; padding: 3px 8px; border-bottom: 1.5px solid rgba(26,48,192,.2); }
 .lobbyrow .code { font-size: 22px; letter-spacing: 3px; padding: 0 8px; border-width: 2px; }
 .lobbyrow button { font-size: 18px; padding: 3px 12px; }
+
+/* ---- touch controls (phones) ------------------------------------------------------------- */
+/* Drawn in the same pen as the rest of the HUD: dashed rings, ink on paper, multiplied down onto
+   the canvas. Everything is box-sizing: border-box here so a ring's border does not push it
+   off the point it is anchored to - the same trap the scope ring fell into. */
+body.touch, body.touch #c { overscroll-behavior: none; touch-action: none; -webkit-user-select: none; user-select: none; }
+/* Every offset below is measured from a safe edge rather than the glass, because on a notched
+   phone held sideways the notch eats about 59px off one side and the home indicator another 21
+   off the bottom. Named vars rather than env() inline so a test harness can pretend to be a
+   notched phone by overriding four numbers. */
+#hud { --sal: env(safe-area-inset-left); --sar: env(safe-area-inset-right); --sat: env(safe-area-inset-top); --sab: env(safe-area-inset-bottom); }
+.tc { display: none; position: fixed; inset: 0; z-index: 40; pointer-events: none; mix-blend-mode: multiply; }
+#hud.touch .tc { display: block; }
+#hud.nogame .tc, .screen.show ~ .tc { display: none; }
+.tb { box-sizing: border-box; position: absolute; display: flex; align-items: center; justify-content: center; text-align: center;
+  border: 2.5px dashed var(--ink); border-radius: 50%; color: var(--ink); font-size: 15px; letter-spacing: .03em; line-height: 1;
+  background: rgba(246,243,230,.3); pointer-events: auto; touch-action: none; -webkit-tap-highlight-color: transparent; opacity: .8; }
+.tb.on { background: rgba(26,48,192,.2); opacity: 1; border-style: solid; }
+/* the fire cluster, laid out for a right thumb that never has to leave the corner */
+.b-fire { right: calc(14px + var(--sar)); bottom: calc(14px + var(--sab)); width: 106px; height: 106px; font-size: 20px; border-width: 3px; }
+.b-aim { right: calc(128px + var(--sar)); bottom: calc(20px + var(--sab)); width: 68px; height: 68px; }
+.b-jump { right: calc(24px + var(--sar)); bottom: calc(128px + var(--sab)); width: 74px; height: 74px; }
+.b-reload { right: calc(124px + var(--sar)); bottom: calc(100px + var(--sab)); width: 62px; height: 62px; font-size: 12px; }
+.b-slide { right: calc(112px + var(--sar)); bottom: calc(174px + var(--sab)); width: 56px; height: 56px; font-size: 12px; }
+.b-hook { right: calc(18px + var(--sar)); bottom: calc(212px + var(--sab)); width: 58px; height: 58px; font-size: 12px; }
+.b-melee { right: calc(198px + var(--sar)); bottom: calc(56px + var(--sab)); width: 56px; height: 56px; font-size: 11px; }
+.b-nade { right: calc(190px + var(--sar)); bottom: calc(146px + var(--sab)); width: 54px; height: 54px; font-size: 12px; }
+/* weapons along the bottom edge, where either thumb can reach them. These double as the weapon
+   readout, so they are squarer and quieter than the action rings and carry three states. */
+/* The row is centred on the screen until that would slide the fourth one under AIM, and from there
+   it holds station 12px clear of it - which is what happens on a small phone whose notch has
+   already eaten 50px off the side it needs. */
+#hud { --slotc: min(50%, calc(100% - var(--sar) - 300px)); }
+.b-s1, .b-s2, .b-s3, .b-s4, .b-s5 { bottom: calc(10px + var(--sab)); width: 44px; height: 40px; border-radius: 9px; font-size: 17px; opacity: .55; }
+.b-s1 { left: calc(var(--slotc) - 96px); } .b-s2 { left: calc(var(--slotc) - 48px); } .b-s3 { left: var(--slotc); } .b-s4 { left: calc(var(--slotc) + 48px); } .b-s5 { left: calc(var(--slotc) + 96px); }
+.tb.gone { display: none; }
+.tb.cur { opacity: 1; border-style: solid; background: rgba(26,48,192,.14); }
+.tb.dry { color: var(--red); border-color: var(--red); }
+/* pause and the scoreboard live in the corner the left thumb never reaches over */
+.b-pause { top: calc(8px + var(--sat)); left: calc(10px + var(--sal)); width: 44px; height: 34px; border-radius: 8px; font-size: 13px; }
+.b-score { top: calc(8px + var(--sat)); left: calc(60px + var(--sal)); width: 48px; height: 34px; border-radius: 8px; font-size: 13px; }
+/* the movement stick draws itself wherever the thumb landed and follows it if it wanders */
+.tc-stick { position: fixed; left: 0; top: 0; width: 0; height: 0; opacity: 0; transition: opacity .12s; }
+.tc-stick.on { opacity: .8; }
+.tc-stick i { box-sizing: border-box; position: absolute; left: -58px; top: -58px; width: 116px; height: 116px; border: 2.5px dashed var(--ink); border-radius: 50%; }
+.tc-stick b { box-sizing: border-box; position: absolute; left: -26px; top: -26px; width: 52px; height: 52px; border: 3px solid var(--ink); border-radius: 50%; background: rgba(246,243,230,.45); }
+/* a phone held upright shows about a third of the arena, so ask for it sideways instead */
+.tc-rot { display: none; }
+#hud.touch .tc-rot { position: fixed; inset: 0; z-index: 90; background: var(--paper); color: var(--ink);
+  flex-direction: column; align-items: center; justify-content: center; gap: 18px; text-align: center; font-size: 30px; pointer-events: auto; }
+#hud.touch .tc-rot span { font-size: 64px; display: block; animation: rot 1.8s ease-in-out infinite; }
+@keyframes rot { 0%, 40% { transform: rotate(0deg); } 70%, 100% { transform: rotate(90deg); } }
+@media (orientation: portrait) { #hud.touch .tc-rot { display: flex; } }
+/* menus: fingers need bigger targets and the panel has to fit a short landscape window */
+#hud.touch .screen .panel { padding: 14px 18px; max-height: 100%; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+#hud.touch .screen h1 { font-size: 46px; margin: 2px 0 4px; }
+#hud.touch .screen h2 { font-size: 20px; margin: 0 0 8px; }
+#hud.touch .screen button { min-height: 46px; padding: 8px 20px; }
+#hud.touch .screen .cols { font-size: 17px; }
+/* the config screen on a phone: one column, smaller everything, and the panel already scrolls */
+#hud.touch .cfgopen { font-size: 19px; padding: 4px 16px; }
+#hud.touch .cfgopen i { font-size: 12px; }
+#hud.touch .config { gap: 4px; margin: 4px 0 2px; }
+/* A landscape phone is short and wide, which is the opposite of a narrow desktop window - so where
+   the media query above stacks the columns, here they sit side by side. 300px is the narrowest a row
+   can be and still leave the label room to read; at 852px that lands two columns, on a tablet three. */
+#hud.touch .cfgcol { flex: 1 1 300px; min-width: 280px; width: auto; gap: 4px; }
+#hud.touch .cfghead { font-size: 18px; margin-top: 4px; }
+#hud.touch .cfgrow { grid-template-columns: 1fr 116px 44px; gap: 8px; font-size: 16px; }
+#hud.touch .cfgrow .cfgname i { font-size: 12px; }
+#hud.touch .cfgrow input[type=range] { width: 116px; height: 26px; }
+#hud.touch .cfgfoot { margin-top: 8px; padding-top: 8px; }
+
+/* ---- the HUD on a phone ------------------------------------------------------------------- */
+/* A landscape phone is about 850x390 CSS pixels and thirteen of those pixels-wide rings are
+   already spent on buttons. The desktop HUD was laid out in percentages of a monitor, so on a
+   phone it lands on top of the controls. So: anything the buttons themselves already say is
+   dropped, everything else is shrunk and pinned to a corner with a real pixel offset, and the
+   two centred banners are given narrow boxes so they stop running under the right-hand cluster. */
+
+/* the weapon list, the per-slot ammo and the keyboard hint are all in the four slot buttons now,
+   and the tally of kills is a decoration this screen cannot afford */
+#hud.touch .slots, #hud.touch .hint, #hud.touch .tally { display: none; }
+
+/* score sits beside the pause buttons; the middle of the top edge is left for the boss bar */
+#hud.touch .hud-tl { left: calc(118px + var(--sal)); top: calc(10px + var(--sat)); font-size: 17px; }
+#hud.touch .combo { font-size: 16px; min-height: 18px; }
+/* wave, modifier and enemies-left top right, clear of the HOOK ring below them */
+#hud.touch .hud-tr { right: calc(10px + var(--sar)); top: calc(8px + var(--sat)); font-size: 17px; max-width: min(40vw, 200px); }
+/* one line, clipped: the full sentence is in the wave banner and on the pause screen, and a
+   three-line modifier here grows the block down into the HOOK ring on a short phone */
+#hud.touch .modifier { font-size: 13px; min-height: 15px; line-height: 1.15; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#hud.touch .timer { font-size: 16px; }
+#hud.touch .pvpscore { font-size: 14px; }
+#hud.touch .pvpscore .target { font-size: 12px; }
+/* health, ammo and grenades stack in the bottom left corner the second trigger used to hold */
+#hud.touch .hud-bl { left: calc(10px + var(--sal)); bottom: calc(8px + var(--sab)); }
+#hud.touch .health { font-size: 15px; gap: 6px; margin-bottom: 3px; }
+#hud.touch .stam { font-size: 9px; gap: 6px; margin: -2px 0 3px; }
+#hud.touch .stam .bar { height: 6px; }
+#hud.touch .bar { width: 104px; height: 11px; border-width: 2px; }
+#hud.touch .ammo b { font-size: 30px; } #hud.touch .ammo span { font-size: 15px; }
+#hud.touch .reloading { font-size: 14px !important; }
+#hud.touch .nades { margin-left: 8px; } #hud.touch .nades i { width: 10px; height: 12px; border-width: 2px; }
+/* the weapon name is the one thing in the bottom-right block worth keeping, so it moves to sit
+   on top of that stack instead of under the FIRE button */
+#hud.touch .hud-br { right: auto; left: calc(10px + var(--sal)); bottom: calc(72px + var(--sab)); text-align: left; }
+#hud.touch .weapon { font-size: 17px; opacity: .85; }
+/* the kill feed reads down the left edge, under the pause buttons */
+#hud.touch .killfeed { right: auto; left: calc(10px + var(--sal)); top: calc(60px + var(--sat)); text-align: left; font-size: 15px; max-width: 190px; line-height: 1.15; }
+/* the two centred banners get boxes narrow enough to miss the right-hand cluster */
+/* high enough that the banner clears the whole right-hand cluster on a 360px-tall phone */
+#hud.touch .message { left: 50%; right: auto; top: calc(44px + var(--sat)); width: 40vw; transform: translateX(-50%); }
+#hud.touch .msg-main { font-size: 32px; letter-spacing: 1px; }
+#hud.touch .msg-sub { font-size: 15px; line-height: 1.2; }
+/* the boss bar shares the top edge with the score and the wave, so it gives way to them */
+#hud.touch .bossbar { top: calc(5px + var(--sat)); width: min(260px, calc(100vw - var(--sal) - var(--sar) - 420px)); margin-left: 0; transform: translateX(-50%); font-size: 14px; line-height: 1.1; }
+#hud.touch .bar.big { width: 100%; height: 12px; margin-top: 3px; }
+/* the tip centres on the part of the screen that is not buttons, not on the screen. Centred on the
+   screen it runs under the SLASH ring on a small phone, and there is no width that both fits a
+   sentence and clears that ring - the right quarter of a landscape phone simply belongs to the
+   right thumb. */
+#hud.touch .tip { left: 0; right: calc(262px + var(--sar)); bottom: calc(96px + var(--sab)); font-size: 15px; line-height: 1.2; }
+/* the katana gauge is a vertical strip on the left; on a phone it only has to be legible */
+#hud.touch .focus-meter { left: calc(8px + var(--sal)); font-size: 13px; }
+/* the scoreboard is a held-open overlay, so it only has to fit */
+#hud.touch .board { top: 6%; min-width: 0; width: 78vw; padding: 8px 12px; font-size: 15px; max-height: 84%; overflow-y: auto; }
+#hud.touch .board h3 { font-size: 19px; margin-bottom: 3px; }
+#hud.touch .board div { gap: 10px; } #hud.touch .board .foot { font-size: 12px; }
+#hud.touch .board .pg { min-width: 58px; } #hud.touch .board .pg small { font-size: 12px; }

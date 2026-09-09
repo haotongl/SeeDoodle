@@ -17,12 +17,18 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const zlib = require('zlib');
 
 const PORT = Number(process.argv[2] || process.env.PORT || 8080);
+// unset means every interface, which is what a LAN game wants. Set it to 127.0.0.1 when something
+// else — a reverse proxy — is the only thing that should be able to reach the game.
+const HOST = process.env.HOST || undefined;
 const ROOT = __dirname;
 const MAX_PLAYERS = 10;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1: they get misread over voice chat
 const MAX_FRAME = 1 << 20;
+const STALL_BYTES = 64 * 1024;   // unsent backlog past which superseded state is dropped, not queued
+const WEDGE_BYTES = 192 * 1024;  // ...and past which, with nothing coming back, the socket is written off
 
 // ---------------------------------------------------------------- static files
 const MIME = {
@@ -33,6 +39,12 @@ const MIME = {
   '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wasm': 'application/wasm',
 };
 
+// three.js is 1.3MB of source and 260KB gzipped, which is the difference between a snappy load and
+// a five-second stare on anything slower than a LAN. Nothing here changes while the process runs,
+// so each file is compressed once and the bytes are kept; a stat per request catches an edit.
+const COMPRESSIBLE = /^(text\/|application\/(javascript|json)|image\/svg)/;
+const gzCache = new Map(); // absolute path -> { mtimeMs, buf }
+
 function serveStatic(req, res) {
   let rel;
   try { rel = decodeURIComponent(new URL(req.url, 'http://x').pathname); } catch (e) { rel = '/'; }
@@ -42,12 +54,33 @@ function serveStatic(req, res) {
   if (file !== ROOT && !file.startsWith(ROOT + path.sep)) { res.writeHead(403).end('forbidden'); return; }
   fs.stat(file, (err, st) => {
     if (err || !st.isFile()) { res.writeHead(404, { 'content-type': 'text/plain' }).end('not found'); return; }
-    res.writeHead(200, {
-      'content-type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream',
-      'content-length': st.size,
-      'cache-control': 'no-cache',
+    const type = MIME[path.extname(file).toLowerCase()] || 'application/octet-stream';
+    // A vendored library is pinned and can be held for ever; the game's own source is edited
+    // between matches, and a cached copy of it would be a bug report that cannot be reproduced.
+    const vendor = file.slice(ROOT.length).split(path.sep).includes('vendor');
+    const cache = vendor ? 'public, max-age=31536000, immutable' : 'no-cache';
+    const head = (extra, len) => ({ 'content-type': type, 'content-length': len, 'cache-control': cache, ...extra });
+    const gzip = /\bgzip\b/.test(req.headers['accept-encoding'] || '') && COMPRESSIBLE.test(type) && st.size > 1024;
+    if (!gzip) {
+      res.writeHead(200, head({}, st.size));
+      if (req.method === 'HEAD') { res.end(); return; }
+      fs.createReadStream(file).pipe(res);
+      return;
+    }
+    const done = (buf) => {
+      res.writeHead(200, head({ 'content-encoding': 'gzip', vary: 'accept-encoding' }, buf.length));
+      res.end(req.method === 'HEAD' ? undefined : buf);
+    };
+    const hit = gzCache.get(file);
+    if (hit && hit.mtimeMs === st.mtimeMs) { done(hit.buf); return; }
+    fs.readFile(file, (e, raw) => {
+      if (e) { res.writeHead(404, { 'content-type': 'text/plain' }).end('not found'); return; }
+      zlib.gzip(raw, { level: 6 }, (ze, buf) => {
+        if (ze) { res.writeHead(200, head({}, raw.length)).end(raw); return; }
+        gzCache.set(file, { mtimeMs: st.mtimeMs, buf });
+        done(buf);
+      });
     });
-    fs.createReadStream(file).pipe(res);
   });
 }
 
@@ -57,8 +90,9 @@ const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
 class WSConn {
   constructor(socket) {
     this.socket = socket; this.buf = Buffer.alloc(0); this.closed = false;
-    this.onmessage = null; this.onclose = null;
+    this.onmessage = null; this.onclose = null; this.dropped = 0;
     this.fragOp = 0; this.frags = [];
+    this.out = []; this.outLen = 0; this.flushT = null;
     socket.on('data', (d) => this._feed(d));
     // Sockets handed over by an HTTP upgrade allow half-open, so a peer that hangs up gives us
     // 'end' and nothing else: no 'close', no 'error'. Miss that and the connection sits here for
@@ -72,6 +106,8 @@ class WSConn {
   _dead() {
     if (this.closed) return;
     this.closed = true;
+    if (this.flushT) { clearImmediate(this.flushT); this.flushT = null; }
+    this.out.length = 0; this.outLen = 0;
     try { this.socket.destroy(); } catch (e) { /* already gone */ }
     if (this.onclose) this.onclose();
   }
@@ -127,11 +163,40 @@ class WSConn {
     else if (len < 65536) { head = Buffer.allocUnsafe(4); head[1] = 126; head.writeUInt16BE(len, 2); }
     else { head = Buffer.allocUnsafe(10); head[1] = 127; head.writeUInt32BE(0, 2); head.writeUInt32BE(len, 6); }
     head[0] = 0x80 | opcode;
-    try { this.socket.write(head); this.socket.write(payload); } catch (e) { this._dead(); }
+    // Queued, not written. A full room relays every position update to nine other sockets twenty
+    // times a second; writing each frame the moment it is built costs two syscalls each, and with
+    // Nagle off (which a shooter wants) every one of them can leave as its own packet - eighteen
+    // packets per socket per tick carrying ninety bytes apiece. Everything produced in one turn of
+    // the event loop goes out together instead: same bytes, same order, one write, microseconds
+    // later. setImmediate and not a timer, so this is never a frame of added latency.
+    this.out.push(head, payload);
+    this.outLen += head.length + len;
+    if (!this.flushT) this.flushT = setImmediate(() => this._flush());
   }
-  send(str) { this._write(Buffer.from(str, 'utf8'), 0x1); }
+  _flush() {
+    this.flushT = null;
+    if (!this.out.length) return;
+    const buf = Buffer.concat(this.out, this.outLen);
+    this.out.length = 0; this.outLen = 0;
+    if (this.closed) return;
+    try { this.socket.write(buf); } catch (e) { this._dead(); }
+  }
+  // What is waiting to reach this peer: bytes not yet flushed, plus bytes node is holding because
+  // the kernel would not take them. Zero on a healthy connection; tens of kilobytes means the link
+  // has stalled and TCP is retransmitting into the dark.
+  get pending() { return this.outLen + (this.socket.writableLength || 0); }
+  // A position update is worth sending only if it is the newest one. Queueing it behind 64KB of
+  // its own predecessors makes the stall worse and delivers a burst of history when the link
+  // recovers, so past that mark the droppable traffic is simply skipped: the next tick supersedes
+  // it anyway. Joins, leaves, host changes and damage are not droppable and always go.
+  send(str, droppable) {
+    if (droppable && this.pending > STALL_BYTES) { this.dropped++; return; }
+    this._write(Buffer.from(str, 'utf8'), 0x1);
+  }
   close() {
     if (this.closed) return;
+    if (this.flushT) { clearImmediate(this.flushT); this.flushT = null; }
+    this._flush();                 // anything already queued goes out ahead of the close frame
     this.closed = true;
     try {
       this._closing = true;
@@ -183,10 +248,10 @@ function dropRoom(room) {
   for (const c of room.codes) if (rooms.get(c) === room) rooms.delete(c);
 }
 
-function send(client, obj) { if (client && client.ws && !client.ws.closed) client.ws.send(JSON.stringify(obj)); }
-function toRoom(room, obj, exceptId) {
+function send(client, obj, droppable) { if (client && client.ws && !client.ws.closed) client.ws.send(JSON.stringify(obj), droppable); }
+function toRoom(room, obj, exceptId, droppable) {
   const s = JSON.stringify(obj);
-  for (const m of room.members.values()) if (m.id !== exceptId && m.ws && !m.ws.closed) m.ws.send(s);
+  for (const m of room.members.values()) if (m.id !== exceptId && m.ws && !m.ws.closed) m.ws.send(s, droppable);
 }
 
 function roomInfo(room) {
@@ -223,6 +288,45 @@ function joinRoom(client, room, meta) {
   return {
     t: 'joined', code: room.code, id: client.id, hostId: room.hostId, isPublic: room.isPublic,
     map: room.map, inMatch: room.inMatch, max: room.max, members: roster(room),
+  };
+}
+
+// ---------------------------------------------------------------- surviving a blip
+//
+// A closed socket used to be the end of somebody's match: the slot was freed on the spot, the room
+// was told `gone`, and if it was the host everyone was dragged through a promotion. Over wifi, over
+// mobile data, or over any path with real packet loss that happens for a second or two at a time,
+// and the game becomes unplayable for reasons that have nothing to do with the game.
+//
+// So a socket closing no longer means the player left - it means they went quiet. The seat, the id,
+// the room and the host job are all held while the client opens a new socket and says `resume` with
+// the token it was handed at `hello`. Come back in time and the room is never told anything
+// happened. Miss the window and the ordinary leave path runs, exactly as it did before.
+const GRACE_MS = 12000;      // how long a quiet player keeps their seat
+const HOST_GRACE_MS = 3500;  // the host holds the enemies and the clock, so hand those on sooner
+
+function stall(client) {
+  const room = client.room;
+  if (!room) { clients.delete(client.id); return; }
+  client.gone = Date.now();
+  toRoom(room, { t: 'stall', id: client.id }, client.id);
+  client.graceT = setTimeout(() => {
+    if (!client.gone) return;
+    leaveRoom(client, 'connection lost');
+    clients.delete(client.id);
+  }, room.hostId === client.id ? HOST_GRACE_MS : GRACE_MS);
+  client.graceT.unref();
+}
+
+// Both the first socket of a seat and every socket that resumes it come through here, so a resumed
+// player is wired up exactly like a fresh one.
+function bind(ws, client) {
+  ws.onmessage = (raw) => { client.seen = Date.now(); try { onMessage(client, raw); } catch (e) { console.error('message error:', e.message); } };
+  ws.onclose = () => {
+    if (client.ws !== ws) return;   // a superseded socket of a seat somebody has already resumed
+    if (client.gone) return;        // already quiet; the grace timer owns what happens next
+    if (client.room) { stall(client); return; }
+    leaveRoom(client); clients.delete(client.id);
   };
 }
 
@@ -266,11 +370,13 @@ const ORIGIN_SLACK = 6.0;     // how far from the shooter a shot may claim to ha
 
 // PVP numbers lifted from GUNS in src/weapons.js: the most one hit can take off, and how fast
 // claims may arrive. A shotgun fires ten pellets and each one reports separately.
+// `mv` is the muzzle velocity from the same table, and only bounds how long a round may claim to
+// have been in the air.
 const ARMS = {
-  rifle: { max: 19 * 1.8, rate: 11, burst: 4, reach: 300 },
-  shotgun: { max: 16 * 1.6, rate: 10 / 0.78, burst: 30, reach: 60 },
-  sniper: { max: 150 * 1.5, rate: 5, burst: 3, reach: 300 },
-  revolver: { max: 52 * 2.9, rate: 1 / 0.3, burst: 3, reach: 300 },
+  rifle: { max: 19 * 1.8, rate: 11, burst: 4, reach: 300, mv: 330 },
+  shotgun: { max: 16 * 1.6, rate: 10 / 0.78, burst: 30, reach: 60, mv: 200 },
+  sniper: { max: 150 * 1.5, rate: 5, burst: 3, reach: 300, mv: 450 },
+  revolver: { max: 52 * 2.9, rate: 1 / 0.3, burst: 3, reach: 300, mv: 260 },
   katana: { max: 55, rate: 3, burst: 4, reach: 4.5 },
   grenade: { max: 62, rate: 1.25, burst: 8, reach: 6.4 * 0.95 },
 };
@@ -336,6 +442,14 @@ function raySegDist2(o, dir, maxT, p, q) {
   const w = [r[0] + d1[0] * s - d2[0] * t, r[1] + d1[1] * s - d2[1] * t, r[2] + d1[2] * s - d2[2] * t];
   return dot3(w, w);
 }
+// Squared distance from a point to the standing figure's axis - what a shot that curved on the way
+// there gets checked against, since there is no straight line left to trace.
+function pointSegDist2(p, a, b) {
+  const ab = sub(b, a), ap = sub(p, a), e = dot3(ab, ab);
+  const t = e > 1e-9 ? Math.min(1, Math.max(0, dot3(ap, ab) / e)) : 0;
+  const w = [ap[0] - ab[0] * t, ap[1] - ab[1] * t, ap[2] - ab[2] * t];
+  return dot3(w, w);
+}
 const vec3 = (v) => (Array.isArray(v) && v.length >= 3 && v.every((n) => typeof n === 'number' && Number.isFinite(n)) ? [v[0], v[1], v[2]] : null);
 
 // A token bucket per weapon: enough to cover a burst, refilling at the rate the gun can actually
@@ -363,13 +477,22 @@ function resolveHit(client, m) {
 
   // Wind the target back to the shooter's screen. Their own round trip sets how far, capped so a
   // player who lets their connection rot cannot reach ever further into the past.
+  // Note what it is NOT: the flight time of the round. A claim is sent when the bullet lands, not
+  // when it leaves, so the shooter's screen was already this far behind whatever it was aiming at.
+  // Which is also why a client cannot buy anything by lying about `t` - it does not appear here.
   const rewind = Math.min(MAX_REWIND_MS, rttOf(client) + INTERP_MS);
   const seen = whereAt(victim, now - rewind);
   if (!seen) return deny('target never reported a position');
   if (!seen.alive) return deny('target already down');
   const target = [seen.x, seen.y, seen.z];
-  // The shooter themselves is only one trip away, not a trip plus the interpolation buffer.
-  const selfNow = whereAt(client, now - rttOf(client) / 2);
+  // How long the round was in the air: zero unless the room is playing with ballistics, and capped
+  // at what the gun could plausibly take to cross its own range.
+  const rawT = Number(m.ft);
+  const tof = rawT > 0 && arm.mv ? Math.min(rawT, Math.min(1, (arm.reach / arm.mv) * 1.5)) : 0;
+  // Where the shooter was when they pulled the trigger. `hist` is stamped with arrival times, and a
+  // sample arrives one upload trip after the moment it describes, so the moment the trigger went is
+  // `now - tof` on this clock - and plain `now` for an instant shot, which is what it always was.
+  const selfNow = whereAt(client, now - tof * 1000);
 
   if (m.k === 'grenade') {
     const at = vec3(m.at);
@@ -382,15 +505,27 @@ function resolveHit(client, m) {
     const gap = len3(sub([selfNow.x, selfNow.y + 0.9, selfNow.z], [target[0], target[1] + 0.9, target[2]]));
     if (gap > arm.reach) return deny('out of reach');
   } else {
-    const o = vec3(m.o), dir = vec3(m.d);
-    if (!o || !dir) return deny('malformed claim');
-    const dl = len3(dir);
-    if (dl < 1e-6) return deny('malformed claim');
-    const unit = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
-    const reach = Math.min(arm.reach, Math.max(1, Number(m.r) || arm.reach) + 2);
+    const o = vec3(m.o);
+    if (!o) return deny('malformed claim');
     if (selfNow && len3(sub(o, [selfNow.x, selfNow.y + 0.9, selfNow.z])) > ORIGIN_SLACK) return deny('shot did not start at the shooter');
-    const d2 = raySegDist2(o, unit, reach, [target[0], target[1] + HULL_LO, target[2]], [target[0], target[1] + HULL_HI, target[2]]);
-    if (d2 > HULL_R * HULL_R) return deny('shot missed where they were');
+    const lo = [target[0], target[1] + HULL_LO, target[2]], hi = [target[0], target[1] + HULL_HI, target[2]];
+    if (tof > 0) {
+      // A round that fell on the way cannot be re-traced from here, so what gets checked is the
+      // point the client says it landed on: it has to be on the figure where the rewind puts them,
+      // and no further from the muzzle than the gun reaches.
+      const p = vec3(m.p);
+      if (!p) return deny('malformed claim');
+      if (len3(sub(p, o)) > arm.reach + HULL_R) return deny('out of reach');
+      if (pointSegDist2(p, lo, hi) > HULL_R * HULL_R) return deny('shot missed where they were');
+    } else {
+      const dir = vec3(m.d);
+      if (!dir) return deny('malformed claim');
+      const dl = len3(dir);
+      if (dl < 1e-6) return deny('malformed claim');
+      const unit = [dir[0] / dl, dir[1] / dl, dir[2] / dl];
+      const reach = Math.min(arm.reach, Math.max(1, Number(m.r) || arm.reach) + 2);
+      if (raySegDist2(o, unit, reach, lo, hi) > HULL_R * HULL_R) return deny('shot missed where they were');
+    }
   }
 
   shots.ok++;
@@ -487,6 +622,30 @@ function onMessage(client, raw) {
       leaveRoom(client);
       break;
 
+    // A new socket claiming a seat that went quiet. The token was handed out over the seat's
+    // original connection and is never relayed, so holding it is the proof of being the same
+    // player - which matters, because the seat carries a score and possibly the host job.
+    case 'resume': {
+      const seat = clients.get(String(m.id || ''));
+      const ok = seat && seat.gone && seat.room && seat.token && m.token === seat.token;
+      if (!ok) { send(client, { t: 'error', for: 'resume', message: 'that seat is gone' }); break; }
+      clearTimeout(seat.graceT); seat.graceT = null; seat.gone = 0;
+      clients.delete(client.id);          // this socket arrived as a stranger; it is not one
+      const old = seat.ws;
+      seat.ws = client.ws; seat.seen = Date.now();
+      bind(seat.ws, seat);
+      if (old && old !== seat.ws) { try { old.close(); } catch (e) { /* already gone */ } }
+      send(seat, {
+        // the seat's token, not this socket's: the stranger record it arrived as has just been
+        // thrown away, and the client has to keep holding the key to the seat it actually has
+        t: 'resumed', token: seat.token, code: seat.room.code, id: seat.id, hostId: seat.room.hostId,
+        isPublic: seat.room.isPublic, map: seat.room.map, inMatch: seat.room.inMatch,
+        max: seat.room.max, members: roster(seat.room),
+      });
+      toRoom(seat.room, { t: 'back', id: seat.id }, seat.id);
+      break;
+    }
+
     // a shot the shooter believes landed. Judged here, against where the target was on their
     // screen rather than where it is now - see the lag compensation section above.
     case 'hit':
@@ -504,11 +663,14 @@ function onMessage(client, raw) {
       // The position feed is relayed as it always was, but read on the way past: this is what the
       // rewind is built from, stamped with the time it got here.
       if (m.tt === 'ps') noteMove(client, m.d, Date.now());
+      // Position and enemy snapshots describe the present and are worthless late; everything else
+      // is an event that has to arrive. See WSConn.send for what that buys on a stalled link.
+      const drop = m.tt === 'ps' || m.tt === 'esnap';
       const out = JSON.stringify({ t: 'm', tt: m.tt, d: m.d, from: client.id });
-      if (m.to) { const target = room.members.get(m.to); if (target && target.ws && !target.ws.closed) target.ws.send(out); break; }
-      if (m.relay || client.id === room.hostId) { for (const p of room.members.values()) if (p.id !== client.id && p.ws && !p.ws.closed) p.ws.send(out); break; }
+      if (m.to) { const target = room.members.get(m.to); if (target && target.ws && !target.ws.closed) target.ws.send(out, drop); break; }
+      if (m.relay || client.id === room.hostId) { for (const p of room.members.values()) if (p.id !== client.id && p.ws && !p.ws.closed) p.ws.send(out, drop); break; }
       const host = room.members.get(room.hostId);
-      if (host && host.ws && !host.ws.closed) host.ws.send(out);
+      if (host && host.ws && !host.ws.closed) host.ws.send(out, drop);
       break;
     }
 
@@ -529,10 +691,19 @@ function onMessage(client, raw) {
 const server = http.createServer((req, res) => {
   if (req.url === '/lan/info') {
     res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-cache' });
-    const pings = [...clients.values()].filter((c) => c.room).map((c) => Math.round(rttOf(c)));
+    const inRooms = [...clients.values()].filter((c) => c.room);
+    const pings = inRooms.map((c) => Math.round(rttOf(c)));
     res.end(JSON.stringify({
       port: PORT, addresses: localAddresses(), rooms: new Set(rooms.values()).size, players: clients.size,
       shots: { ...shots, rtt: pings.sort((a, b) => a - b) },
+      // what the links themselves are doing, which is the first thing to look at when someone says
+      // the game keeps dropping them: quiet seats waiting on a resume, and superseded state that
+      // was skipped rather than queued behind a stalled socket
+      links: {
+        quiet: inRooms.filter((c) => c.gone).length,
+        backlog: inRooms.map((c) => (c.gone ? -1 : c.ws.pending)).sort((a, b) => b - a).slice(0, 5),
+        skipped: inRooms.reduce((n, c) => n + (c.ws.dropped || 0), 0),
+      },
     }));
     return;
   }
@@ -544,21 +715,34 @@ server.on('upgrade', (req, socket) => {
   if (url !== '/ws') { socket.destroy(); return; }
   const ws = handleUpgrade(req, socket);
   if (!ws) return;
-  const client = { id: newId(), ws, name: '', room: null, meta: {}, seen: Date.now(), hist: [], rtt: [], buckets: {} };
+  const client = {
+    id: newId(), ws, name: '', room: null, meta: {}, seen: Date.now(), hist: [], rtt: [], buckets: {},
+    token: crypto.randomBytes(12).toString('base64url'), gone: 0, graceT: null,
+  };
   clients.set(client.id, client);
-  ws.onmessage = (raw) => { client.seen = Date.now(); try { onMessage(client, raw); } catch (e) { console.error('message error:', e.message); } };
-  ws.onclose = () => { leaveRoom(client); clients.delete(client.id); };
-  send(client, { t: 'hello', id: client.id, max: MAX_PLAYERS });
+  bind(ws, client);
+  send(client, { t: 'hello', id: client.id, token: client.token, max: MAX_PLAYERS });
 });
 
 // Closing a laptop lid or dropping off the wifi sends no FIN, so TCP alone would hold that player's
-// slot for minutes. Clients ping every 15s; three missed pings and we treat them as gone, which
-// frees the slot and promotes a new host through the same path as a clean disconnect.
-const SILENT_MS = 45000;
+// slot for minutes. Clients ping every few seconds; miss enough of them and we treat them as gone,
+// which now means the seat goes quiet and is held for the grace period rather than freed outright.
+//
+// The second rule is the one that matters on a bad link. A socket can be open and useless: TCP
+// retransmitting into a black hole with our writes stacking up behind it, for thirty seconds at a
+// time. Waiting out SILENT_MS on that is half a minute of a frozen match. When the backlog is deep
+// and nothing at all has come back, write the socket off - the client opens a new one and resumes
+// into the same seat within a second or so, which is far less disruptive than riding out the stall.
+const SILENT_MS = 20000;
+const WEDGE_MS = 6000;
 setInterval(() => {
   const now = Date.now();
-  for (const c of clients.values()) if (now - c.seen > SILENT_MS) c.ws.close();
-}, 5000).unref();
+  for (const c of clients.values()) {
+    if (c.gone) continue;   // no socket to close; the grace timer is already counting
+    const quiet = now - c.seen;
+    if (quiet > SILENT_MS || (quiet > WEDGE_MS && c.ws.pending > WEDGE_BYTES)) c.ws.close();
+  }
+}, 2000).unref();
 
 // Round trips, for the rewind. Only people in a room, and only while a match could be running:
 // there is nothing to compensate for in a lobby. A second apart is fine - the floor of the last
@@ -569,9 +753,25 @@ setInterval(() => {
   for (const c of clients.values()) if (c.room) send(c, { t: 'ping', d: now });
 }, 1000).unref();
 
+// The same numbers, handed back to the room for the scoreboard. Measured here rather than
+// self-reported, so what a player reads on Tab is exactly what the rewind is working from and
+// nobody can flatter their own connection. A quiet seat reports -1 rather than a stale reading.
+setInterval(() => {
+  for (const room of new Set(rooms.values())) {
+    if (room.members.size < 2) continue;
+    const p = {};
+    for (const m of room.members.values()) p[m.id] = m.gone ? -1 : Math.round(rttOf(m));
+    toRoom(room, { t: 'pings', p }, null, true);
+  }
+}, 1000).unref();
+
 function localAddresses() {
   const out = [];
-  for (const [iface, addrs] of Object.entries(os.networkInterfaces() || {})) {
+  // a sandbox can refuse the netlink socket this needs (systemd RestrictAddressFamilies, containers).
+  // Nothing here is worth dropping a room full of players over, so an empty list is the answer.
+  let ifaces;
+  try { ifaces = os.networkInterfaces(); } catch (e) { return out; }
+  for (const [iface, addrs] of Object.entries(ifaces || {})) {
     for (const a of addrs || []) {
       if (a.internal) continue;
       if (a.family === 'IPv6' && /^fe80:/i.test(a.address)) continue; // link-local needs a zone id browsers will not take
@@ -582,12 +782,13 @@ function localAddresses() {
   return out.sort((a, b) => (a.family === b.family ? 0 : a.family === 'IPv4' ? -1 : 1));
 }
 
-server.listen(PORT, () => {
-  const addrs = localAddresses();
+server.listen(PORT, HOST, () => {
+  const addrs = HOST ? [] : localAddresses();
   const url = (a) => (a.family === 'IPv6' ? `http://[${a.address}]:${PORT}` : `http://${a.address}:${PORT}`);
   console.log('\n  Doodle District — LAN server\n');
-  console.log(`  on this machine   http://localhost:${PORT}`);
-  if (!addrs.length) console.log('  (no LAN address found — is this machine on a network?)');
+  console.log(`  on this machine   http://${HOST && HOST !== '127.0.0.1' ? HOST : 'localhost'}:${PORT}`);
+  if (HOST) console.log(`  (bound to ${HOST} only — reachable through whatever proxies to it)`);
+  else if (!addrs.length) console.log('  (no LAN address found — is this machine on a network?)');
   for (const a of addrs) console.log(`  on the LAN        ${url(a)}   [${a.iface} ${a.family}]`);
   console.log('\n  Others open one of the LAN links, or keep their own copy and type');
   console.log(`  the address into PLAY ONLINE → server. Ctrl+C to stop.\n`);

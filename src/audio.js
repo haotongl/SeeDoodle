@@ -161,6 +161,8 @@ class Sfx {
   stomp(pos) { this.noise({ dur: 0.4, gain: 0.8, type: 'lowpass', freq: 400, freqEnd: 60, pos }); this.tone({ freq: 60, freqEnd: 25, dur: 0.5, gain: 0.7, type: 'sine', pos }); }
   bossRoar(pos) { this.tone({ freq: 90, freqEnd: 60, dur: 0.9, gain: 0.5, type: 'sawtooth', pos }); this.noise({ dur: 0.8, gain: 0.4, type: 'bandpass', freq: 500, q: 0.8, pos }); }
   shieldHit(pos) { this.tone({ freq: rand(600, 800), freqEnd: 300, dur: 0.12, gain: 0.2, type: 'square', pos }); this.noise({ dur: 0.05, gain: 0.3, type: 'highpass', freq: 3000, pos }); }
+  // launch, not detonation: a hard whoosh out of the tube with the motor still lit behind it
+  rocketFire(pos) { this.noise({ dur: 0.5, gain: 0.7, type: 'lowpass', freq: 2200, freqEnd: 300, pos }); this.tone({ freq: 160, freqEnd: 420, dur: 0.4, gain: 0.35, type: 'sawtooth', pos }); this.noise({ dur: 0.7, gain: 0.18, type: 'bandpass', freq: 900, q: 0.6, delay: 0.06, pos }); }
   airdrop() { this.tone({ freq: 660, dur: 0.15, gain: 0.15, type: 'triangle' }); this.tone({ freq: 880, dur: 0.2, gain: 0.15, type: 'triangle', delay: 0.15 }); }
   crateLand(pos) { this.noise({ dur: 0.3, gain: 0.6, type: 'lowpass', freq: 500, freqEnd: 80, pos }); }
   // ---------- music: an 8-bit theme, two pulse voices, a triangle bass, an arpeggio and drums ----------

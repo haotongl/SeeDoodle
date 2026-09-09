@@ -14,39 +14,18 @@ export const makeCode = () => Array.from({ length: 5 }, () => ALPHABET[Math.floo
 
 const DEFAULT_PORT = 8080;
 const OPEN_TIMEOUT = 8000, REQ_TIMEOUT = 12000;
+// A socket that closes mid-match is usually the network hiccuping, not the player leaving, so we
+// go back for the seat the server is holding. Rising gaps because the first two attempts cost
+// nothing and a link that is still down after ten seconds is not coming back this second either.
+const RETRY_MS = [200, 400, 900, 1800, 3000, 4000];
 
-// Turn whatever someone typed into a ws:// url. Accepts a bare IPv4, a bare IPv6 (with or without
-// brackets), either with an optional :port, a hostname, or a full url. Empty means "wherever this
-// page came from", which is the common case: you opened the host's link, so the host is the server.
-export function serverURL(addr) {
-  const secure = typeof location !== 'undefined' && location.protocol === 'https:';
-  const scheme = secure ? 'wss:' : 'ws:';
-  let s = String(addr || '').trim();
-  if (!s) {
-    if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) return `${scheme}//${location.host}/ws`;
-    return `ws://localhost:${DEFAULT_PORT}/ws`;
+// The room server is whichever machine served this page. There is nothing to configure: you opened
+// somebody's link, so they are the server, and everyone who opened the same link lands together.
+function serverURL() {
+  if (typeof location !== 'undefined' && /^https?:$/.test(location.protocol)) {
+    return `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
   }
-  if (/^(wss?|https?):\/\//i.test(s)) {
-    const u = new URL(s);
-    return `${u.protocol === 'https:' || u.protocol === 'wss:' ? 'wss:' : 'ws:'}//${u.host}/ws`;
-  }
-  const fallbackPort = (typeof location !== 'undefined' && location.port) || DEFAULT_PORT;
-  let host, port = fallbackPort;
-  if (s[0] === '[') {                                   // [::1] or [::1]:9000
-    const end = s.indexOf(']');
-    if (end < 0) throw new Error('that address is missing a closing bracket');
-    host = s.slice(0, end + 1);
-    const rest = s.slice(end + 1);
-    if (rest.startsWith(':')) port = rest.slice(1);
-  } else if ((s.match(/:/g) || []).length >= 2) {        // bare IPv6, so every colon is part of it
-    host = `[${s}]`;
-  } else {
-    const i = s.lastIndexOf(':');
-    if (i > 0) { host = s.slice(0, i); port = s.slice(i + 1); } else host = s;
-  }
-  if (!host || host === '[]') throw new Error('that does not look like an address');
-  if (!/^\d+$/.test(String(port)) || Number(port) < 1 || Number(port) > 65535) throw new Error('that port does not look right');
-  return `${scheme}//${host}:${port}/ws`;
+  return `ws://localhost:${DEFAULT_PORT}/ws`;
 }
 
 export class Net {
@@ -55,9 +34,11 @@ export class Net {
     this.id = null; this.code = null; this.hostId = null; this.aliasCode = null;
     this.handlers = new Map(); this.connected = false;
     this.onPeerJoin = null; this.onPeerLeave = null; this.onDisconnect = null; this.onAlias = null; this.onHostChange = null;
+    this.onStall = null; this.onPeerStall = null;
     this.maxPlayers = 10; this._accepting = true; this._inMatch = false; this._hostName = '';
     this.stats = { sent: 0, recv: 0 }; this.isPublic = false;
     this._waits = new Map(); this._waitSeq = 0; this._pingT = null; this.rtt = 0;
+    this.token = null; this.resuming = false; this._meta = {}; this.pings = {};
   }
   get active() { return !!this.sock && this.connected; }
   get peerIds() { return [...this.conns.keys()]; }
@@ -74,7 +55,6 @@ export class Net {
   _pushState() { if (this.isHost && this.sock && this.sock.readyState === 1) this._raw({ t: 'state', accepting: this._accepting, inMatch: this._inMatch }); }
 
   // ---- transport ----
-  setServer(addr) { const u = serverURL(addr); if (u !== this.url) { this.url = u; this._close(); } return u; }
   _raw(obj) { const s = this.sock; if (s && s.readyState === 1) s.send(JSON.stringify(obj)); }
   _close() {
     clearInterval(this._pingT); this._pingT = null;
@@ -86,18 +66,20 @@ export class Net {
   async _ensure() {
     if (this.sock && this.sock.readyState === 1) return;
     if (this._opening) return this._opening;
-    if (!this.url) this.url = serverURL('');
+    if (!this.url) this.url = serverURL();
     this._close();
     this._opening = new Promise((resolve, reject) => {
       let sock;
-      try { sock = new WebSocket(this.url); } catch (e) { reject(new Error('that address is not reachable')); return; }
+      try { sock = new WebSocket(this.url); } catch (e) { reject(new Error('the server is not reachable')); return; }
       const timer = setTimeout(() => { try { sock.close(); } catch (e) { /* ignore */ } reject(new Error('the server did not answer')); }, OPEN_TIMEOUT);
       sock.onopen = () => {
         clearTimeout(timer); this.sock = sock;
         sock.onmessage = (ev) => this._onMessage(ev.data);
         sock.onclose = () => this._onClose();
         sock.onerror = () => { /* onclose always follows */ };
-        this._pingT = setInterval(() => this._raw({ t: 'ping', d: performance.now() }), 15000);
+        // liveness, not measurement - the server times the round trip from its own side. Often
+        // enough that a couple of lost ones do not look like somebody who walked away.
+        this._pingT = setInterval(() => this._raw({ t: 'ping', d: performance.now() }), 5000);
         if (this._hostName) this._raw({ t: 'name', name: this._hostName });
         resolve();
       };
@@ -110,7 +92,47 @@ export class Net {
     this.sock = null; clearInterval(this._pingT); this._pingT = null;
     for (const [, w] of this._waits) w.reject(new Error('lost the connection to the server'));
     this._waits.clear();
-    if (this.connected) { this.connected = false; this.conns.clear(); if (this.onDisconnect) this.onDisconnect(); }
+    if (!this.connected) return;
+    // Not a departure - a hiccup, until proven otherwise. The server holds the seat for a few
+    // seconds, so keep the match standing and go back for it. `connected` deliberately stays true:
+    // the game above carries on simulating and its sends no-op until there is a socket again.
+    if (this.resuming) return;
+    this.resuming = true;
+    if (this.onStall) this.onStall(true);
+    this._retry(0);
+  }
+  // Try the held seat first, then a plain rejoin of the same room (which is what is left when the
+  // grace period ran out and somebody else was promoted), then wait and try again.
+  async _retry(n) {
+    if (!this.resuming) return;
+    if (n >= RETRY_MS.length) { this._giveUp('lost the connection to the server'); return; }
+    await new Promise((r) => setTimeout(r, RETRY_MS[n]));
+    if (!this.resuming) return;
+    const seat = { id: this.id, token: this.token, code: this.code };
+    try { await this._ensure(); } catch (e) { this._retry(n + 1); return; }
+    if (!this.resuming) return;
+    try {
+      const res = await this._request({ t: 'resume', id: seat.id, token: seat.token }, 'resume', 6000);
+      this._back(res, res.hostId === (res.id || this.id));
+      return;
+    } catch (e) { /* the seat is gone; get back in the ordinary way */ }
+    if (!this.resuming) return;
+    if (!seat.code) { this._giveUp('lost the connection to the server'); return; }
+    try {
+      const res = await this._request({ t: 'join', code: seat.code, name: this._hostName, meta: this._meta }, 'join');
+      this._back(res, res.hostId === (res.id || this.id));
+    } catch (e) { this._retry(n + 1); }
+  }
+  _back(res, isHost) {
+    this._adopt(res, isHost);
+    this.resuming = false;
+    if (this.onStall) this.onStall(false);
+  }
+  _giveUp(msg) {
+    this.resuming = false;
+    if (this.onStall) this.onStall(false);
+    this.connected = false; this.conns.clear();
+    if (this.onDisconnect) this.onDisconnect(msg);
   }
   // one in-flight request per kind; the reply carries `for` so it can be matched back
   _request(msg, kind, timeoutMs = REQ_TIMEOUT) {
@@ -140,9 +162,14 @@ export class Net {
     if (!m || typeof m !== 'object') return;
     this.stats.recv++;
     switch (m.t) {
-      case 'hello': this.id = m.id; if (m.max) this.maxPlayers = m.max; break;
+      case 'hello': this.id = m.id; if (m.token) this.token = m.token; if (m.max) this.maxPlayers = m.max; break;
       case 'created': this._settle('create', null, m); break;
       case 'joined': this._settle('join', null, m) || this._settle('quick', null, m); break;
+      case 'resumed': this._settle('resume', null, m); break;
+      // somebody else's link went quiet. Their seat is being held, so leave the figure standing
+      // and say so rather than tearing them out of the match over a couple of dropped packets.
+      case 'stall': if (this.onPeerStall) this.onPeerStall(m.id, true); break;
+      case 'back': if (this.onPeerStall) this.onPeerStall(m.id, false); break;
       case 'list': this._settle('list', null, m.rooms || []); break;
       case 'alias':
         this.aliasCode = m.code; this.code = m.code;
@@ -182,6 +209,8 @@ export class Net {
       // judges a shot; all this end has to do is answer, echoing its clock back untouched
       case 'ping': this._raw({ t: 'pong', d: m.d }); break;
       case 'pong': if (typeof m.d === 'number') this.rtt = Math.round(performance.now() - m.d); break;
+      // everyone's round trip as the server measures it; -1 is a seat whose link is quiet
+      case 'pings': this.pings = m.p || {}; break;
       default: break;
     }
   }
@@ -190,8 +219,11 @@ export class Net {
   _adopt(res, isHost) {
     this.connected = true; this.isHost = isHost;
     this.id = res.id || this.id; this.hostId = res.hostId; this.code = res.code; this.aliasCode = res.code;
+    // a resumed seat keeps its own key: the `hello` on this socket was addressed to the stranger
+    // it arrived as, and that record is gone
+    if (res.token) this.token = res.token;
     this.isPublic = !!res.isPublic; if (res.max) this.maxPlayers = res.max;
-    this.conns.clear();
+    this.conns.clear(); this.pings = {};
     for (const p of res.members || []) if (p.id !== this.id) this.conns.set(p.id, this._conn(p.id));
     this._pushState();
   }
@@ -210,6 +242,7 @@ export class Net {
     code = String(code || '').trim().toUpperCase();
     if (!code) throw new Error('enter a lobby code');
     await this._ensure();
+    this._meta = meta || {};
     const res = await this._request({ t: 'join', code, name: meta.name || this._hostName, meta }, 'join');
     this._adopt(res, res.hostId === (res.id || this.id));
     return this.code;
@@ -218,6 +251,7 @@ export class Net {
     this.leave();
     await this._ensure();
     if (onStatus) onStatus('looking for an open lobby…');
+    this._meta = meta || {};
     const res = await this._request({ t: 'quick', name: meta.name || this._hostName, meta }, 'quick');
     this._adopt(res, res.hostId === (res.id || this.id));
     return this.code;
@@ -234,6 +268,7 @@ export class Net {
     this._raw({ t: 'alias', code: String(code).toUpperCase() });
   }
   leave() {
+    this.resuming = false;   // whatever we were going back for, we no longer want it
     if (this.sock && this.sock.readyState === 1 && this.connected) this._raw({ t: 'leave' });
     this.connected = false; this.isHost = false; this.conns.clear();
     this.code = null; this.hostId = null; this.aliasCode = null; this._inMatch = false;

@@ -1,6 +1,7 @@
-// Game bootstrap: solo waves, free-for-all lobbies, checkpoints, scoring, screens and the loop.
-// Online play is peer-to-peer: one player's browser hosts the lobby and keeps score, every
-// player runs their own body, and each one tells the others what it did.
+// Game bootstrap: solo waves, deathmatch and squad lobbies, checkpoints, scoring, screens, the loop.
+// Online play is relayed by the server in ../server.js rather than peered: one player in each room
+// is the host and owns the enemies, the waves and the pickups, every player runs their own body,
+// and hits between players are judged by the server with the latency rewound out of them.
 import * as THREE from 'three';
 import { InkRenderer, INK, makeInkMaterial } from './render.js';
 import { World } from './physics.js';
@@ -10,17 +11,27 @@ import { NavGrid } from './nav.js';
 import { Effects } from './effects.js';
 import { EnemyManager, BOSSES } from './enemies.js';
 import { Player } from './player.js';
+import { Bullets } from './bullets.js';
 import { RemotePlayer, encodeLocal } from './players.js';
-import { Net, serverURL } from './net.js';
+import { Net } from './net.js';
 import { HUD, CONTROLS_HTML } from './hud.js';
+import { isTouchDevice, TouchControls, TOUCH_CONTROLS_HTML } from './touch.js';
+import { t, ts, trDom, getLang, setLang, LANGS } from './i18n.js';
 import { audio } from './audio.js';
+import { SETTINGS, DIFFICULTY, MOBILITY, diffOf, mobOf, loadSettings, saveSettings } from './settings.js';
 import { rand, choose, clamp } from './util.js';
 
 const canvas = document.getElementById('c');
 const R = new InkRenderer(canvas);
 const world = new World();
 const knownMap = (k) => (LEVELS.some((m) => m.key === k) ? k : 'district');
-let mapKey = knownMap(localStorage.getItem('doodle_map') || 'district');
+// A pvp-only map is built for hunting people in the dark: no room for a wave of thirty, and nowhere
+// for them to come from. It is offered in a deathmatch lobby and nowhere else, and this is the one
+// gate that decides it - every path into the level goes through here, so a stale localStorage key or
+// a host who switches to squad survival with it picked both land back on the district.
+const arenaMaps = (ffa) => LEVELS.filter((m) => ffa || !m.pvpOnly);
+const playable = (k, ffa) => (arenaMaps(ffa).some((m) => m.key === k) ? k : 'district');
+let mapKey = playable(localStorage.getItem('doodle_map') || 'district', false);
 let level = buildLevel(R.scene, world, mapKey, { arena: false });
 let nav = new NavGrid(world, level.bounds, 1).build();
 let loadedKey = mapKey, arenaLoaded = false;
@@ -34,9 +45,14 @@ function setLevel(key, on, force = false) {
   ctx.level = level; ctx.nav = nav; if (window.__game) { window.__game.level = level; window.__game.nav = nav; }
   audio.setTune(key === 'mexico' ? 'mexico' : 'district');
 }
-const setArena = (on) => setLevel(knownMap(net.active ? (lobby.map || mapKey) : mapKey), on);
+const setArena = (on) => setLevel(playable(net.active ? (lobby.map || mapKey) : mapKey, on), on);
 const input = new Input(canvas);
 const hud = new HUD(document.getElementById('hud'));
+// A phone goes straight into touch controls - the decision is made once, here, on the way in.
+const hudEl = document.getElementById('hud');
+const touchMode = isTouchDevice();
+const touch = touchMode ? new TouchControls(hudEl, input) : null;
+if (touchMode) { hudEl.classList.add('touch'); document.body.classList.add('touch'); input.usingTouch = true; hud.setTouch(true); }
 const effects = new Effects(R.scene, world);
 const ctx = { scene: R.scene, camera: R.camera, world, level, nav, input, hud, effects, audio, renderer: R };
 
@@ -45,13 +61,13 @@ let best = Number(localStorage.getItem('doodle_best') || 0);
 let musicWanted = localStorage.getItem('doodle_music') !== '0';
 let checkpoint = Number(localStorage.getItem('doodle_checkpoint') || 0);
 let myName = (localStorage.getItem('doodle_name') || '').slice(0, 14) || 'doodle' + Math.floor(Math.random() * 90 + 10);
-// which machine on the network runs the room server. Empty means "the one that served this page",
-// which is what you want when you opened someone's link; type an address to point somewhere else.
-let serverAddr = localStorage.getItem('doodle_server') || '';
-const settings = { sens: Number(localStorage.getItem('doodle_sens') || 100), invert: localStorage.getItem('doodle_invert') === '1' };
+// The config panel writes straight into this object and the player reads it live off ctx.opt, so a
+// slider moves the game under you rather than on the next round.
+const settings = ctx.opt = loadSettings();
 function applySettings() {
   input.mouseSens = 0.0022 * settings.sens / 100; input.padSensX = 3.4 * settings.sens / 100; input.padSensY = 2.6 * settings.sens / 100; input.invertY = settings.invert;
-  localStorage.setItem('doodle_sens', String(settings.sens)); localStorage.setItem('doodle_invert', settings.invert ? '1' : '0');
+  applyRules();
+  saveSettings(settings);
 }
 // ---------------- game state ----------------
 const FFA_TARGET = 20, FFA_TIME = 600, RESPAWN = 2.5;
@@ -59,7 +75,7 @@ let matchLeft = FFA_TIME, clockT = 0, clockRunning = false;
 const mmss = (t) => { t = Math.max(0, Math.ceil(t)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
 const game = ctx.game = {
   state: 'start', mode: 'solo', menu: false, time: 0, hitstopT: 0, hitstopScale: 1, wave: 0, score: 0, combo: 0, comboT: 0, kills: 0, intermission: 0, queue: [], spawnT: 0, maxAlive: 6, deathT: 0,
-  focus: { active: false, t: 0, chain: 0, target: null, dash: null, arm: 0, ready: false }, katanaStreak: 0, boss: null, respawnT: 0, matchT: 0, over: null, overT: 0,
+  focus: { active: false, t: 0, chain: 0, target: null, dash: null, arm: 0, ready: false }, katanaStreak: 0, rocketDropped: false, boss: null, respawnT: 0, matchT: 0, over: null, overT: 0,
   hitstop(d, s) { this.hitstopT = Math.max(this.hitstopT, d); this.hitstopScale = s; },
   addScore(pts, label) { const mult = 1 + Math.min(this.combo, 9) * 0.25; const p = Math.round(pts * mult); this.score += p; if (label) hud.kill(label, p); hud.setScore(this.score, this.combo); },
   onPlayerDeath() { endFocus(); onLocalDeath(); },
@@ -70,14 +86,23 @@ const coop = () => game.mode === 'coop';
 const versus = () => game.mode === 'ffa';
 const enemies = ctx.enemies = new EnemyManager(ctx);
 const player = ctx.player = new Player(ctx);
+const bullets = ctx.bullets = new Bullets(ctx);
 player.name = myName;
 const net = new Net();
 const remote = new Map();      // peer id -> RemotePlayer
-const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa' };
+const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid' };
 const scores = new Map();      // peer id -> { name, kills, deaths }
 let screen = 'main';           // which start-screen panel is showing: main | online | lobby
 window.__game = { ctx, game, player, enemies, nav, world, level, hud, effects, input, net, remote, lobby, scores };
 
+// Whose call it is, following the map: alone it is your own setting, in a lobby it is the host's,
+// so everybody in a match is shooting the same physics.
+ctx.ballistics = () => (net.active ? !!lobby.ballistics : settings.ballistics);
+ctx.difficulty = () => (net.active ? lobby.diff : settings.difficulty) || 'easy';
+// The movement ladder is a deathmatch rule and nothing else: solo and squad play get `null`, which
+// is the full kit. In versus it is the host's pick, same as the map and the ballistics.
+ctx.mobility = () => (versus() ? lobby.mob || 'mid' : null);
+function applyRules() { player.applyDifficulty(ctx.difficulty()); player.applyMobility(ctx.mobility()); }
 // anything a bullet or a blade can hit besides enemies
 ctx.targets = () => [player, ...remote.values()];
 // co-op is one team: your shots pass through your friends and only the enemies bleed
@@ -128,7 +153,16 @@ ctx.hitPlayer = (t, dmg, info) => {
   // that player back to where our screen had them and decides. Send the ray we actually fired so
   // there is something to check it against; the katana has no ray, only a reach.
   const claim = { k: info.source, dmg: Math.round(dmg), crit: !!info.crit, part: info.part || null };
-  if (info.dir && info.dist > 0) {
+  if (info.tof > 0 && info.muzzle) {
+    // A round that fell on the way there did not travel in a straight line, so there is no ray to
+    // hand over. Send where it left from, where it landed and how long it was in the air instead
+    // (`ft`, not `t` - `t` is the message type this claim is spread into).
+    // The flight time buys nothing: the rewind is the round trip either way (see server.js).
+    claim.ft = +info.tof.toFixed(3);
+    claim.p = [+info.point.x.toFixed(2), +info.point.y.toFixed(2), +info.point.z.toFixed(2)];
+    claim.o = [+info.muzzle.x.toFixed(2), +info.muzzle.y.toFixed(2), +info.muzzle.z.toFixed(2)];
+    claim.r = +info.dist.toFixed(2);
+  } else if (info.dir && info.dist > 0) {
     claim.r = +info.dist.toFixed(2);
     claim.d = [+info.dir.x.toFixed(4), +info.dir.y.toFixed(4), +info.dir.z.toFixed(4)];
     claim.o = [+(info.point.x - info.dir.x * info.dist).toFixed(2), +(info.point.y - info.dir.y * info.dist).toFixed(2), +(info.point.z - info.dir.z * info.dist).toFixed(2)];
@@ -182,33 +216,76 @@ function breakProp(br, dir, local, quiet = false) {
 // every ray a gun fires this tick is sent to the others, who draw it as a tracer from the shooter's gun
 const shotQueue = [];
 ctx.onShot = (end) => { if (net.active && inMatch()) shotQueue.push(+end.x.toFixed(1), +end.y.toFixed(1), +end.z.toFixed(1)); };
-const TRACER_THICK = { rifle: 0.02, shotgun: 0.014, sniper: 0.03 };
+// a round with flight time has no end point to send yet, so send where it started and which way it
+// went: the others fly the same arc on their own screens, for the look of it only
+const bulletQueue = [];
+ctx.onBullet = (b) => {
+  if (!net.active || !inMatch()) return;
+  const mv = b.vel.length();
+  bulletQueue.push(+b.origin.x.toFixed(2), +b.origin.y.toFixed(2), +b.origin.z.toFixed(2),
+    +(b.vel.x / mv).toFixed(4), +(b.vel.y / mv).toFixed(4), +(b.vel.z / mv).toFixed(4));
+};
+const TRACER_THICK = { rifle: 0.02, shotgun: 0.014, sniper: 0.03, revolver: 0.026, rocket: 0.085 };
+// how somebody else's round flies on this screen, keyed off the weapon kind the `shots` message
+// already carries -- a rocket has to droop and bang like one or it reads as a stray tracer
+const REMOTE_ROUND = { shotgun: { maxRange: 80 }, rocket: { maxRange: 160, grav: 2.2, explosive: true, blastR: 5.6 } };
 const _sm = new THREE.Vector3(), _se = new THREE.Vector3();
 
 // ---------------- pickups ----------------
 const pickups = []; let pickupId = 1;
-const pmat = { ammo: makeInkMaterial({ ink: INK.BLUE }), health: makeInkMaterial({ ink: INK.GREEN }), cap: makeInkMaterial({ ink: INK.BLACK }), shell: makeInkMaterial({ ink: INK.ORANGE }) };
+const pmat = { ammo: makeInkMaterial({ ink: INK.BLUE }), health: makeInkMaterial({ ink: INK.GREEN }), cap: makeInkMaterial({ ink: INK.BLACK }), shell: makeInkMaterial({ ink: INK.ORANGE }), rocket: makeInkMaterial({ ink: INK.ORANGE }) };
+const PICKUP_INK = { ammo: INK.BLUE, rocket: INK.ORANGE, health: INK.GREEN };
 function makePickup(kind) {
   const g = new THREE.Group();
-  if (kind === 'ammo') { g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.24, 0.5, 10), pmat.ammo)); const c = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.16, 8), pmat.cap); c.position.y = 0.33; g.add(c); const l = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.02), pmat.cap); l.position.set(0, 0, 0.24); g.add(l); }
+  if (kind === 'rocket') {
+    // a tube with a round beside it: orange so it reads as "the special one" from across a street
+    const t = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.9, 10), pmat.rocket); t.rotation.z = Math.PI / 2; g.add(t);
+    const w = new THREE.Mesh(new THREE.ConeGeometry(0.09, 0.22, 8), pmat.cap); w.rotation.z = -Math.PI / 2; w.position.set(0.53, 0, 0); g.add(w);
+    const c = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.2, 8, 1, true), pmat.cap); c.rotation.z = Math.PI / 2; c.position.set(-0.52, 0, 0); g.add(c);
+    const gr = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.16, 0.07), pmat.cap); gr.position.set(-0.1, -0.16, 0); g.add(gr);
+  }
+  else if (kind === 'ammo') { g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.24, 0.5, 10), pmat.ammo)); const c = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.16, 8), pmat.cap); c.position.y = 0.33; g.add(c); const l = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.2, 0.02), pmat.cap); l.position.set(0, 0, 0.24); g.add(l); }
   else if (level.key === 'mexico') { const sh = new THREE.CylinderGeometry(0.42, 0.42, 0.22, 12, 1, false, 0, Math.PI); sh.rotateZ(Math.PI / 2); sh.rotateX(-Math.PI / 2); g.add(new THREE.Mesh(sh, pmat.shell)); const f = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.1, 0.2), pmat.health); f.position.y = 0.02; g.add(f); const m = new THREE.Mesh(new THREE.BoxGeometry(0.66, 0.08, 0.14), pmat.cap); m.position.y = 0.1; g.add(m); }
   else { g.add(new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.2, 0.2), pmat.health), new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.6, 0.2), pmat.health)); }
   return g;
 }
+// A flyer dies over the street and its ammo box used to hang there in mid-air. Drops now fall to
+// whatever is under them. Both ends run this same snap against the same level geometry, so the
+// host keeps broadcasting the death point and the wire format does not change - the client sees
+// the fall too. No floor within 60m (shot down over the edge of the page) means no floor at all:
+// leave it where it died and let `life` retire it, rather than dropping forever.
 function spawnPickup(kind, pos, id = null) {
   const m = makePickup(kind); m.position.copy(pos); m.position.y += 0.6; R.scene.add(m);
-  const p = { id: id ?? pickupId++, kind, mesh: m, base: m.position.y, t: rand(0, 6), life: 45 }; pickups.push(p);
+  const gy = world.groundBelow(pos.x, pos.y + 1.2, pos.z, 60), rest = gy + 0.45;
+  const grounded = gy > pos.y + 1.2 - 60 && rest < m.position.y - 0.02;
+  const p = { id: id ?? pickupId++, kind, mesh: m, base: grounded ? rest : m.position.y, t: rand(0, 6), life: 45, vy: grounded ? 0 : null };
+  pickups.push(p);
   if (net.isHost) net.send('pickup', { id: p.id, kind, pos: pos.toArray() });
   return p;
 }
 function removePickup(p) { R.scene.remove(p.mesh); const i = pickups.indexOf(p); if (i >= 0) pickups.splice(i, 1); }
 function collectPickup(p) {
-  if (p.kind === 'ammo') { player.addAmmoAll(0.4); player.grenades = Math.min(player.maxGrenades, player.grenades + 1); hud.kill('+AMMO · +GRENADE', 0); } else { player.hp = Math.min(player.maxHp, player.hp + 35); hud.kill(level.key === 'mexico' ? 'TACO · +35 HP' : '+35 HP', 0); }
-  audio.pickup(); effects.strokeBurst(p.mesh.position, p.kind === 'ammo' ? INK.BLUE : INK.GREEN, 12, 4, { life: 0.3 });
+  if (p.kind === 'rocket') {
+    const rl = player.weapons[player.rocketIndex];
+    const first = rl.unlock(2);
+    hud.kill(first ? '+ROCKET LAUNCHER · SLOT 5' : '+ROCKET ×2', 0);
+    if (first) hud.tip('rocket launcher · slot 5 · armour comes apart', 4);
+  }
+  else if (p.kind === 'ammo') { player.addAmmoAll(0.4); player.grenades = Math.min(player.maxGrenades, player.grenades + 1); hud.kill('+AMMO · +GRENADE', 0); } else { player.hp = Math.min(player.maxHp, player.hp + 35); hud.kill(level.key === 'mexico' ? 'TACO · +35 HP' : '+35 HP', 0); }
+  audio.pickup(); effects.strokeBurst(p.mesh.position, PICKUP_INK[p.kind] || INK.GREEN, 12, 4, { life: 0.3 });
 }
 function updatePickups(dt) {
   for (let i = pickups.length - 1; i >= 0; i--) {
-    const p = pickups[i]; p.t += dt; p.mesh.position.y = p.base + Math.sin(p.t * 2.5) * 0.12; p.mesh.rotation.y += dt * 1.8;
+    const p = pickups[i]; p.t += dt;
+    if (p.vy !== null) {
+      // still falling: gravity until it reaches the rest height worked out at spawn
+      p.vy -= 24 * dt; p.mesh.position.y += p.vy * dt;
+      if (p.mesh.position.y <= p.base) {
+        p.mesh.position.y = p.base; p.vy = null; p.t = 0;
+        effects.strokeBurst(p.mesh.position, p.kind === 'health' ? INK.GREEN : INK.BLUE, 7, 3, { life: 0.22 });
+      }
+    } else p.mesh.position.y = p.base + Math.sin(p.t * 2.5) * 0.12;
+    p.mesh.rotation.y += dt * 1.8;
     if (player.alive && p.mesh.position.distanceTo(player.center) < 1.5) {
       collectPickup(p); removePickup(p);
       if (net.active) net.send(net.isHost ? 'taken' : 'take', { id: p.id });
@@ -217,16 +294,45 @@ function updatePickups(dt) {
     if (!net.active || net.isHost) { p.life -= dt; if (p.life <= 0) { removePickup(p); if (net.isHost) net.send('taken', { id: p.id }); } }
   }
 }
-let pickupClock = 0;
+// Where to put the next crate. Eight darts at the map's pickup spots, throwing away any that would
+// land on top of a crate already there or in the lap of somebody standing on the spot, and keeping
+// the one furthest from everyone alive - so supply pulls people out of where they are rather than
+// rewarding whoever happens to be standing on the spawner.
+function supplySpot() {
+  const spots = level.pickups; if (!spots || !spots.length) return null;
+  let best = null, bestD = -1;
+  for (let n = 0; n < 8; n++) {
+    const s = choose(spots);
+    if (pickups.some((p) => p.mesh.position.distanceTo(s) < 3)) continue;
+    let d = 99;
+    for (const t of ctx.targets()) if (t.alive) d = Math.min(d, t.center.distanceTo(s));
+    if (d < 6) continue;
+    if (d > bestD) { bestD = d; best = s; }
+  }
+  return best;
+}
+// Two clocks rather than one roll: an arena runs out of ammo often and out of health rarely, and a
+// single weighted roll can leave a whole match with no medkit on the floor. If there is nowhere
+// sensible to put it this second, wait a moment and look again instead of burning the interval.
+let ammoClock = 0, healthClock = 20;
 function updateArenaPickups(dt) {
-  if (!net.isHost) return; pickupClock -= dt;
-  if (pickupClock <= 0 && pickups.length < 10) { pickupClock = 7; spawnPickup('ammo', choose(level.pickups)); }
+  if (!net.isHost) return;
+  if ((ammoClock -= dt) <= 0 && pickups.length < 10) { const s = supplySpot(); if (s) { ammoClock = 7; spawnPickup('ammo', s); } else ammoClock = 1.5; }
+  // Health is a versus rule. In squad survival the waves already drop medkits, and adding a second
+  // source would quietly rebalance a mode nobody asked me to touch.
+  if (!versus()) return;
+  if ((healthClock -= dt) <= 0 && pickups.reduce((n, p) => n + (p.kind === 'health'), 0) < 3) {
+    const s = supplySpot(); if (s) { healthClock = 13; spawnPickup('health', s); } else healthClock = 2;
+  }
 }
 
 // ---------------- solo waves ----------------
 const ROSTER = [
   { t: 'grunt', from: 1, w: 10 }, { t: 'rusher', from: 2, w: 6 }, { t: 'bomber', from: 3, w: 3 },
   { t: 'sniper', from: 3, w: 4 }, { t: 'flyer', from: 4, w: 4 }, { t: 'heavy', from: 5, w: 4 }, { t: 'shield', from: 6, w: 4 },
+  // The armoured pair arrive late and thin on the ground. They are not meant to be the wave -- one
+  // of them in among the grunts is the whole idea, because it is the one you cannot just shoot.
+  { t: 'warden', from: 8, w: 2 }, { t: 'siege', from: 10, w: 2 },
 ];
 const MODIFIERS = [
   { name: '', apply: () => { enemies.mods.speed = 1; enemies.mods.damage = 1; } },
@@ -235,14 +341,14 @@ const MODIFIERS = [
   { name: 'SWARM · more of them, thinner', apply: () => { enemies.mods.speed = 1.15; enemies.mods.damage = 0.9; } },
 ];
 const tips = () => [
-  `hold <b>${hud.key('grapple')}</b> to reel in · tap it again to let go mid-swing`,
-  `block with <b>${hud.key('block')}</b> and some of their bullets go back at them`,
-  'kills in the air are worth more · stay off the floor',
-  `<b>${hud.key('grenade')}</b> lobs a grenade · pickups give you more`,
-  `press <b>${hud.key('jump')}</b> again in the air for a double jump`,
+  t`hold <b>${hud.key('grapple')}</b> to reel in · tap it again to let go mid-swing`,
+  t`block with <b>${hud.key('block')}</b> and some of their bullets go back at them`,
+  ts('kills in the air are worth more · stay off the floor'),
+  t`<b>${hud.key('grenade')}</b> lobs a grenade · pickups give you more`,
+  t`press <b>${hud.key('jump')}</b> again in the air for a double jump`,
 ];
 const bossFor = (n) => BOSSES[(Math.floor(n / 5) - 1) % BOSSES.length];
-const enemyName = (t) => ({ boss: 'THE DOODLER', eraser: 'THE ERASER', inkblot: 'THE INKBLOT' })[t] || t.toUpperCase();
+const enemyName = (kind) => ts(({ boss: 'THE DOODLER', eraser: 'THE ERASER', inkblot: 'THE INKBLOT' })[kind] || kind.toUpperCase());
 function startWave(n) {
   game.wave = n; game.queue = []; game.spawnT = 2; game.intermission = 0; game.boss = null; hud.setBoss(null, null);
   const boss = n > 0 && n % 5 === 0;
@@ -260,10 +366,10 @@ function startWave(n) {
   const pool = ROSTER.filter((r) => n >= r.from).map((r) => ({ t: r.t, w: r.w * Math.min(1, 0.3 + 0.25 * (n - r.from)) }));
   const total = pool.reduce((a, r) => a + r.w, 0);
   for (let i = 0; i < count; i++) { let r = Math.random() * total, t = pool[0].t; for (const c of pool) { r -= c.w; if (r <= 0) { t = c.t; break; } } game.queue.push(t); }
-  const sub = boss ? enemyName(bossFor(n)) + ' IS COMING'
-    : n === 1 ? (coop() ? teamSize() + ' of you · they come harder in a crowd' : 'they are crawling off the page')
+  const sub = boss ? t`${enemyName(bossFor(n))} IS COMING`
+    : n === 1 ? (coop() ? t`${teamSize()} of you · they come harder in a crowd` : ts('they are crawling off the page'))
       : mod.name || choose(['ink harder', 'keep scribbling', 'stay off the ground', 'swing for it', 'return their bullets']);
-  hud.message('WAVE ' + n, sub, boss ? 3 : 2.6);
+  hud.message(t`WAVE ${n}`, sub, boss ? 3 : 2.6);
   if (boss) audio.bossRoar(player.center);
   audio.wave();
   if (coopHost()) coopBroadcastWave({ banner: sub, mod: mod.name, boss });
@@ -271,7 +377,7 @@ function startWave(n) {
   player.grenades = Math.min(player.maxGrenades, player.grenades + 1);
   const drops = coop() ? 5 + 2 * teamSize() : 7;
   for (let i = 0; i < drops; i++) spawnPickup(i < Math.ceil(drops * 0.7) ? 'ammo' : 'health', choose(level.pickups));
-  if (n >= 5 && n % 5 === 0 && n > checkpoint) { checkpoint = n; localStorage.setItem('doodle_checkpoint', String(n)); hud.kill('CHECKPOINT · WAVE ' + n, 0); }
+  if (n >= 5 && n % 5 === 0 && n > checkpoint) { checkpoint = n; localStorage.setItem('doodle_checkpoint', String(n)); hud.kill(t`CHECKPOINT · WAVE ${n}`, 0); }
 }
 function pickSpawn(type) {
   const spots = type === 'sniper' ? level.snipers : level.spawns; const pp = player.body.pos;
@@ -290,7 +396,7 @@ function pickSpawn(type) {
 }
 function updateWaves(dt) {
   if (game.intermission > 0) {
-    game.intermission -= dt; hud.setTimer('next wave in ' + Math.ceil(game.intermission));
+    game.intermission -= dt; hud.setTimer(t`next wave in ${Math.ceil(game.intermission)}`);
     if (game.intermission <= 0) { hud.setTimer(''); startWave(game.wave + 1); }
     return;
   }
@@ -302,7 +408,7 @@ function updateWaves(dt) {
     }
   }
   if (!game.queue.length && enemies.alive === 0) {
-    game.intermission = 8; hud.message('WAVE ' + game.wave + ' CLEARED', 'catch your breath · +' + 200 * game.wave, 2.5);
+    game.intermission = 8; hud.message(t`WAVE ${game.wave} CLEARED`, t`catch your breath · +${200 * game.wave}`, 2.5);
     game.addScore(200 * game.wave, null); audio.waveClear(); player.hp = Math.min(player.maxHp, player.hp + 40);
     if (coopHost()) coopBroadcastWave({ cleared: true, heal: 40 });
   }
@@ -323,9 +429,17 @@ enemies.onKill = (e, info, over) => {
   else if (info.source !== 'blast') game.katanaStreak = 0;
   if (info.source === 'deflect') { label = 'RETURN TO SENDER'; pts += 120; }
   if (info.source === 'fall') label = 'FELL OFF THE PAGE';
-  else if (!player.body.onGround && info.source !== 'deflect') { label += ' · AIRBORNE'; pts += 40; }
+  else if (!player.body.onGround && info.source !== 'deflect') { label = ts(label) + ts(' · AIRBORNE'); pts += 40; }
   game.addScore(pts, label); audio.kill(!!info.crit || e.T.boss);
-  const r = Math.random(); if (r < 0.5) spawnPickup('ammo', e.body.pos); else if (r < 0.62) spawnPickup('health', e.body.pos);
+  // Armour rolls its own table, and the first one you ever bring down always pays out a tube --
+  // otherwise the answer to armour is locked behind killing armour, which is a door with the key
+  // on the far side of it. (You can still open it with grenades; this just stops it being luck.)
+  if (e.T.armored) {
+    const r = Math.random(), first = !game.rocketDropped;
+    if (first || r < 0.4) { game.rocketDropped = true; spawnPickup('rocket', e.body.pos); }
+    else if (r < 0.75) spawnPickup('ammo', e.body.pos);
+    else spawnPickup('health', e.body.pos);
+  } else { const r = Math.random(); if (r < 0.5) spawnPickup('ammo', e.body.pos); else if (r < 0.62) spawnPickup('health', e.body.pos); }
 };
 enemies.onBoss = (e) => { if (!e.alive) { hud.setBoss(null, null); game.boss = null; } else { game.boss = e; hud.setBoss(e.T.name, e.hp / e.maxHp); } };
 player.onThrow = (d) => { if (net.active) net.broadcast('nade', d); };
@@ -348,7 +462,7 @@ function enterFocus() {
   if (online() || game.focus.chain >= FOCUS_MAX_CHAIN || !focusCandidate()) return;
   const fresh = !game.focus.active;
   game.focus.active = true; game.focus.t = FOCUS_TIME; game.focus.chain++; game.focus.arm = FOCUS_ARM; game.focus.ready = false;
-  if (fresh) { audio.focusIn(); hud.tip(`<b>SLASH READY</b> · hold ${hud.key('focus')} to dash`, 2.2); }
+  if (fresh) { audio.focusIn(); hud.tip(t`<b>SLASH READY</b> · hold ${hud.key('focus')} to dash`, 2.2); }
 }
 function endFocus() { if (!game.focus.active && !game.focus.dash) return; game.focus.active = false; game.focus.target = null; game.focus.chain = 0; game.focus.dash = null; game.katanaStreak = 0; player.dashLock = false; hud.setFocusMark(null); }
 function startFocusDash(target) { game.focus.dash = { target, t: 0, trail: player.center.clone(), lastTrail: 0 }; player.dashLock = true; player.body.vel.set(0, 0, 0); audio.dash(); player.kickFov(5); input.rumble(0.5, 0.4, 120); hud.setFocusMark(null); }
@@ -419,7 +533,8 @@ function onLocalDeath() {
   if (net.isHost) tallyDeath(net.id, killer);
   game.respawnT = RESPAWN; game.state = 'dying'; game.deathT = 0;
   const kn = killer && scores.get(killer) ? scores.get(killer).name : null;
-  hud.kill(kn ? 'erased by ' + kn + (how ? ' · ' + how + (h.crit ? ' headshot' : '') : '') : 'erased', 0);
+  const tail = how ? ' · ' + ts(how) + (h.crit ? ts(' headshot') : '') : '';
+  hud.kill(kn ? t`erased by ${kn}${tail}` : ts('erased'), 0);
 }
 function respawnLocal() {
   player.reset(arenaSpawn()); player.name = myName; player.lastHitBy = null; player.lastHit = null; game.state = 'play'; player.shieldT = 2; hud.tip('spawn protection · 2s', 1.6);
@@ -439,16 +554,26 @@ function refreshScoreHud() {
   if (coop()) { coopHudTick(0); if (!hud.el.board.hidden) hud.setBoard(boardHTML()); return; }
   const rows = sortedScores(); const top = rows.slice(0, 3); const myIdx = rows.findIndex(([id]) => id === net.id);
   if (myIdx >= 3) top.push(rows[myIdx]);
-  hud.setPvpScore(top.map(([id, sc]) => `<div class="row${id === net.id ? ' me' : ''}"><span class="rank">${rows.findIndex(([x]) => x === id) + 1}.</span><span>${esc(sc.name)}${id === net.id ? ' (you)' : ''}</span><b>${sc.kills}</b></div>`).join('') + `<div class="target">first to ${FFA_TARGET}</div>`);
+  hud.setPvpScore(top.map(([id, sc]) => `<div class="row${id === net.id ? ' me' : ''}"><span class="rank">${rows.findIndex(([x]) => x === id) + 1}.</span><span>${esc(sc.name)}${id === net.id ? ts(' (you)') : ''}</span><b>${sc.kills}</b></div>`).join('') + `<div class="target">${t`first to ${FFA_TARGET}`}</div>`);
   hud.setModifier('');
   if (!hud.el.board.hidden) hud.setBoard(boardHTML());
 }
+// The round trip the server measured for each player, not one they told us about, so this column
+// is the same number the hit rewind is working from. A quiet seat reads "--" rather than freezing
+// on its last good value and pretending the link is fine.
+function pingCell(id) {
+  const ms = net.active ? net.pings[id] : undefined;
+  if (ms == null) return '<i class="pg">--</i>';
+  if (ms < 0) return '<i class="pg bad">quiet</i>';
+  return `<i class="pg ${ms < 70 ? 'good' : ms < 160 ? '' : 'bad'}">${ms}<small>ms</small></i>`;
+}
 function boardHTML(title = null) {
   const rows = sortedScores(); const code = String(net.aliasCode || net.code || '').replace(/-\d+$/, '');
+  const line = (id, s, tail) => `<div class="${id === net.id ? 'me' : ''}"><span>${s.name}${id === net.id ? ts(' (you)') : ''}</span><span class="tail">${tail}</span>${pingCell(id)}</div>`;
   if (coop()) {
-    return `<h3>${title || 'SQUAD SURVIVAL'}</h3>${rows.map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}"><span>${s.name}${id === net.id ? ' (you)' : ''}</span><span>${s.kills} kills · ${s.deaths} downs</span></div>`).join('')}<div class="foot">wave ${game.wave} · ${game.score} points · ${enemies.alive + game.queue.length} left · lobby ${code}</div>`;
+    return `<h3>${ts(title || 'SQUAD SURVIVAL')}</h3>${rows.map(([id, s]) => line(id, s, t`${s.kills} kills · ${s.deaths} downs`)).join('')}<div class="foot">${t`wave ${game.wave} · ${game.score} points · ${enemies.alive + game.queue.length} left · lobby ${code}`}</div>`;
   }
-  return `<h3>${title || 'FREE FOR ALL'}</h3>${rows.map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}"><span>${s.name}${id === net.id ? ' (you)' : ''}</span><span>${s.kills} kills · ${s.deaths} deaths</span></div>`).join('')}<div class="foot">first to ${FFA_TARGET} · ${mmss(matchLeft)} left · lobby ${code}</div>`;
+  return `<h3>${ts(title || 'FREE FOR ALL')}</h3>${rows.map(([id, s]) => line(id, s, t`${s.kills} kills · ${s.deaths} deaths`)).join('')}<div class="foot">${t`first to ${FFA_TARGET} · ${mmss(matchLeft)} left · lobby ${code}`}</div>`;
 }
 function checkWin() {
   if (!net.isHost || !versus() || game.over) return;
@@ -458,10 +583,10 @@ function checkWin() {
 }
 function endMatch(winner) {
   game.over = winner; game.overT = 0; game.state = 'over'; endFocus(); input.exitLock(); hud.setBoard(null);
-  const title = winner.coop ? 'SQUAD WIPED' : winner.id === net.id ? 'YOU WIN' : (winner.name || 'someone') + ' WINS';
-  const sub = winner.coop ? `<div class="go">you held the page to wave ${winner.wave || game.wave} · ${winner.score ?? game.score} points</div>` : '';
-  const tail = winner.coop ? (s) => `${s.kills} kills · ${s.deaths} downs` : (s) => `${s.kills} K · ${s.deaths} D`;
-  hud.setGameplayVisible(false); hud.showScreen(`<h1>${title}</h1>${sub}<div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}"><span>${s.name}</span><span>${tail(s)}</span></div>`).join('')}</div><div class="go" id="overGo">back to the lobby in a moment…</div>`);
+  const title = winner.coop ? ts('SQUAD WIPED') : winner.id === net.id ? ts('YOU WIN') : t`${winner.name || ts('someone')} WINS`;
+  const sub = winner.coop ? `<div class="go">${t`you held the page to wave ${winner.wave || game.wave} · ${winner.score ?? game.score} points`}</div>` : '';
+  const tail = winner.coop ? (s) => t`${s.kills} kills · ${s.deaths} downs` : (s) => t`${s.kills} K · ${s.deaths} D`;
+  hud.setGameplayVisible(false); hud.showScreen(`<h1>${title}</h1>${sub}<div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}"><span>${s.name}</span><span>${tail(s)}</span></div>`).join('')}</div><div class="go" id="overGo">${ts('back to the lobby in a moment…')}</div>`);
 }
 
 // ---------------- networking ----------------
@@ -482,12 +607,23 @@ function addRemote(id, name) {
   };
   remote.set(id, rp); return rp;
 }
-function removeRemote(id) { const r = remote.get(id); if (r) { r.dispose(); remote.delete(id); } lobby.players.delete(id); scores.delete(id); }
+function removeRemote(id) { const r = remote.get(id); if (r) { r.dispose(); remote.delete(id); } lobby.players.delete(id); scores.delete(id); stalled.delete(id); }
 function lobbyRows() { return [...lobby.players.entries()].map(([id, p]) => ({ id, name: p.name })); }
-function broadcastLobby() { net.send('lobby', { players: lobbyRows(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, shown: net.aliasCode || net.code }); renderLobby(); }
+function broadcastLobby() { net.send('lobby', { players: lobbyRows(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, shown: net.aliasCode || net.code }); renderLobby(); }
 const inMatch = () => ['play', 'dying', 'over'].includes(game.state);
-net.onPeerLeave = (id) => { const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill((nm || 'someone') + ' left', 0); sendScores(); } };
+let boardT = 0;   // seconds since the open scoreboard was last redrawn
+net.onPeerLeave = (id) => { const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill(t`${nm || ts('someone')} left`, 0); sendScores(); } };
 net.onDisconnect = (reason) => leaveOnline(reason || 'lost the connection to the server');
+// A link going quiet is no longer the end of anybody's match. The server holds the seat for a few
+// seconds while the socket is rebuilt, so the figure stays standing and we just say what happened;
+// only when the seat really expires does `gone` arrive and the ordinary leave path run.
+const stalled = new Set();
+net.onStall = (quiet) => { if (inMatch() || game.state === 'lobby') hud.kill(quiet ? 'connection lost — reconnecting…' : 'reconnected', 0); };
+net.onPeerStall = (id, quiet) => {
+  const nm = (lobby.players.get(id) || {}).name || 'someone';
+  if (quiet) stalled.add(id); else stalled.delete(id);
+  if (inMatch()) hud.kill(quiet ? t`${nm} has gone quiet` : t`${nm} is back`, 0);
+};
 // ---- host transfer ----
 // The room lives on the server, so a host walking out is a promotion, not a reconnect: the server
 // hands the job to whoever has been in the longest and tells everyone. The old peer-to-peer version
@@ -520,22 +656,22 @@ net.onPeerJoin = (from, meta) => {
   lobby.players.set(from, { name }); addRemote(from, name); broadcastLobby();
   if (game.state === 'play' || game.state === 'dying') {
     if (!scores.has(from)) scores.set(from, { name, kills: 0, deaths: 0 });
-    net.sendTo(from, 'start', { late: true, spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
+    net.sendTo(from, 'start', { late: true, spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
     // a latecomer has an empty world until it is told what is already standing in it
     if (coopHost()) setTimeout(() => sendCoopCatchUp(from), 350);
-    sendScores(); hud.kill(name + ' joined', 0);
+    sendScores(); hud.kill(t`${name} joined`, 0);
   }
 };
 net.on('lobby', (d) => {
-  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = d.mode === 'coop' ? 'coop' : 'ffa'; lobby.order = d.players.map((p) => p.id); lobby.players.clear();
+  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = d.mode === 'coop' ? 'coop' : 'ffa'; lobby.ballistics = !!d.bal; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; if (d.diff || d.mob) applyRules(); lobby.order = d.players.map((p) => p.id); lobby.players.clear();
   for (const p of d.players) lobby.players.set(p.id, { name: p.name });
   for (const p of d.players) if (p.id !== net.id) addRemote(p.id, p.name);
   for (const id of [...remote.keys()]) if (!lobby.players.has(id)) removeRemote(id);
   if (inMatch()) { for (const p of d.players) if (!scores.has(p.id)) scores.set(p.id, { name: p.name, kills: 0, deaths: 0 }); refreshScoreHud(); }
   renderLobby();
 });
-net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill((nm || 'someone') + ' left', 0); renderLobby(); });
-net.on('start', (d) => { if (net.isHost) return; if (d.map) lobby.map = knownMap(d.map); startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, d.mode === 'coop' ? 'coop' : 'ffa'); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
+net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill(t`${nm || ts('someone')} left`, 0); renderLobby(); });
+net.on('start', (d) => { if (net.isHost) return; if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, d.mode === 'coop' ? 'coop' : 'ffa'); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
 net.on('startreq', () => { if (net.isHost && game.state === 'lobby') hostStart(); });
 
 // ---------------- co-op: the host owns the enemies, everyone else mirrors them ----------------
@@ -579,9 +715,9 @@ net.on('ewave', (d) => {
   if (!coopClient()) return;
   game.wave = d.n; game.maxAlive = d.maxAlive || game.maxAlive; game.intermission = d.inter || 0;
   if (d.left != null) coopLeft = d.left;
-  if (d.banner) { hud.message('WAVE ' + d.n, d.banner, d.boss ? 3 : 2.6); audio.wave(); if (d.boss) audio.bossRoar(player.center); }
+  if (d.banner) { hud.message(t`WAVE ${d.n}`, d.banner, d.boss ? 3 : 2.6); audio.wave(); if (d.boss) audio.bossRoar(player.center); }
   if (d.mod != null) hud.setModifier(d.mod);
-  if (d.cleared) { hud.message('WAVE ' + d.n + ' CLEARED', 'catch your breath', 2.5); audio.waveClear(); }
+  if (d.cleared) { hud.message(t`WAVE ${d.n} CLEARED`, 'catch your breath', 2.5); audio.waveClear(); }
   if (d.heal) player.hp = Math.min(player.maxHp, player.hp + d.heal);
   coopHudTick(0);
 });
@@ -591,7 +727,7 @@ let coopLeft = 0;
 function coopHudTick(dt) {
   if (!coop()) return;
   if (coopClient()) {
-    if (game.intermission > 0) { game.intermission = Math.max(0, game.intermission - dt); hud.setTimer(game.intermission > 0 ? 'next wave in ' + Math.ceil(game.intermission) : ''); }
+    if (game.intermission > 0) { game.intermission = Math.max(0, game.intermission - dt); hud.setTimer(game.intermission > 0 ? t`next wave in ${Math.ceil(game.intermission)}` : ''); }
     else hud.setTimer('');
     hud.setWave(game.wave, Math.max(enemies.alive, coopLeft));
   }
@@ -601,7 +737,7 @@ function coopHudTick(dt) {
 function coopBoardRows() {
   const rows = [...scores.entries()].sort((a, b) => b[1].kills - a[1].kills);
   const down = (id) => (id === net.id ? !player.alive : !(remote.get(id) || { alive: true }).alive);
-  return rows.slice(0, 4).map(([id, sc]) => `<div class="row${id === net.id ? ' me' : ''}${down(id) ? ' down' : ''}"><span class="rank">${down(id) ? '✕' : '·'}</span><span>${esc(sc.name)}${id === net.id ? ' (you)' : ''}</span><b>${sc.kills}</b></div>`).join('')
+  return rows.slice(0, 4).map(([id, sc]) => `<div class="row${id === net.id ? ' me' : ''}${down(id) ? ' down' : ''}"><span class="rank">${down(id) ? '✕' : '·'}</span><span>${esc(sc.name)}${id === net.id ? ts(' (you)') : ''}</span><b>${sc.kills}</b></div>`).join('')
     + `<div class="target">wave ${game.wave} · ${game.score} pts</div>`;
 }
 // everything already standing, for someone who just walked in
@@ -625,10 +761,10 @@ net.on('pdmg', (d) => {
 net.on('pdead', (d, from) => {
   const r = remote.get(from); const vn = r ? r.name : 'someone'; const kn = d.killer && scores.get(d.killer) ? scores.get(d.killer).name : null;
   if (r) { r.ragdoll(d.dir ? new THREE.Vector3().fromArray(d.dir) : null, !!d.over); audio.enemyDie(r.center); }
-  const how = d.how ? ' · ' + d.how + (d.crit ? ' headshot' : '') : '';
-  if (coop()) hud.kill(vn + ' is down', 0);
-  else if (d.killer === net.id) { game.kills++; game.addScore(100, 'ERASED ' + vn + how); audio.kill(true); }
-  else hud.kill(kn ? kn + ' erased ' + vn + how : vn + ' fell off the page', 0);
+  const how = d.how ? ' · ' + ts(d.how) + (d.crit ? ts(' headshot') : '') : '';
+  if (coop()) hud.kill(t`${vn} is down`, 0);
+  else if (d.killer === net.id) { game.kills++; game.addScore(100, t`ERASED ${vn}${how}`); audio.kill(true); }
+  else hud.kill(kn ? t`${kn} erased ${vn}${how}` : t`${vn} fell off the page`, 0);
   if (net.isHost) tallyDeath(from, d.killer);
 });
 net.on('nade', (d) => player.throwGrenade(d));
@@ -636,14 +772,24 @@ net.on('brk', (d) => { const br = level.breakables[d.id]; if (br) breakProp(br, 
 net.on('parry', (d) => { audio.shieldHit(player.center); input.rumble(0.35, 0.3, 60); effects.strokeBurst(player.eye.clone().addScaledVector(player.forward, 0.5), INK.ORANGE, 8, 5, { life: 0.2, size: 0.03 }); hud.kill(d.ret ? 'RETURN TO SENDER' : 'DEFLECTED', d.ret ? 25 : 0); });
 net.on('shots', (d, from) => {
   const r = remote.get(from); if (!r || !r.root || !r.alive) return;
+  const th = TRACER_THICK[d.k] || 0.02;
+  if (d.b && d.b.length) {
+    // their rounds, flown here for the look of them: they stop at walls and nothing else, because
+    // whether they hit anybody was settled on the machine that fired them
+    for (let i = 0; i + 5 < d.b.length; i += 6) {
+      _sm.set(d.b[i], d.b[i + 1], d.b[i + 2]); _se.set(d.b[i + 3], d.b[i + 4], d.b[i + 5]);
+      if (_se.lengthSq() > 1e-6) bullets.fire(null, _sm, _se, { cosmetic: true, mv: d.mv || 330, thick: th, maxRange: 300, ...(REMOTE_ROUND[d.k] || {}) });
+    }
+    r.flash(); audio.remoteShot(d.k, _sm); return;
+  }
   _sm.set(r.body.pos.x + r.right.x * 0.3 + r.forward.x * 0.8, r.body.pos.y + 1.35 + r.forward.y * 0.8, r.body.pos.z + r.right.z * 0.3 + r.forward.z * 0.8);
-  const th = TRACER_THICK[d.k] || 0.02; const e = d.e || [];
+  const e = d.e || [];
   for (let i = 0; i + 2 < e.length; i += 3) { _se.set(e[i], e[i + 1], e[i + 2]); effects.tracer(_sm, _se, INK.BLUE, th, 0.06); }
   r.flash(); audio.remoteShot(d.k, _sm);
 });
 net.on('cut', () => { if (player.grapple.state !== 'idle') { player.detachGrapple(false); effects.strokeBurst(player.center, INK.ORANGE, 8, 4, { life: 0.25, size: 0.03 }); hud.tip('your rope got cut', 1.3); input.rumble(0.5, 0.3, 80); } });
 net.on('score', (rows) => { if (!net.isHost) applyScores(rows); });
-net.on('fell', (d, from) => { if (!net.isHost) return; const sc = scores.get(from); if (sc) { sc.kills = Math.max(0, sc.kills - 1); sendScores(); net.send('feed', { text: sc.name + ' fell off the page · -1' }); hud.kill(sc.name + ' fell off the page · -1', 0); } });
+net.on('fell', (d, from) => { if (!net.isHost) return; const sc = scores.get(from); if (sc) { sc.kills = Math.max(0, sc.kills - 1); sendScores(); net.send('feed', { text: sc.name + ' fell off the page · -1' }); hud.kill(t`${sc.name} fell off the page · -1`, 0); } });
 net.on('feed', (d) => hud.kill(String(d.text || ''), 0));
 player.onFall = () => {
   if (!online() || !inMatch()) return;
@@ -678,15 +824,17 @@ function netUpdate(dt) {
   // a connection that died without saying so leaves a figure standing around: drop anyone silent too long
   if (inMatch()) for (const [id, r] of remote) {
     if (!r.lastSeen || performance.now() - r.lastSeen <= 9000) continue;
+    if (stalled.has(id)) continue;   // the server says they are coming back; wait for it to say otherwise
     // a quiet host is not a dead lobby any more: the room is on the server, which will hand the job
     // on if the host really is gone. Leave the figure standing and say so rather than tearing down.
     if (!net.isHost && id === net.hostId) { if (!hostQuiet) { hostQuiet = true; hud.kill('the host has gone quiet', 0); } continue; }
-    const nm = r.name; removeRemote(id); hud.kill(nm + ' lost connection', 0);
+    const nm = r.name; removeRemote(id); hud.kill(t`${nm} lost connection`, 0);
     if (net.isHost) { const c = net.conns.get(id); if (c) { try { c.close(); } catch (e) { /* ignore */ } net.conns.delete(id); } net.send('leave', { id }); broadcastLobby(); sendScores(); }
   }
   hostQuiet = hostQuiet && !!remote.get(net.hostId) && performance.now() - (remote.get(net.hostId).lastSeen || 0) > 9000;
   if (syncTick % 3 === 0 && inMatch()) net.send('ps', encodeLocal(player, player.weaponIndex, { firing: player.firing, idle: input.idleSeconds > IDLE_FLAG }), true);
   if (shotQueue.length) net.broadcast('shots', { k: player.weapon.kind, e: shotQueue.splice(0) });
+  if (bulletQueue.length) net.broadcast('shots', { k: player.weapon.kind, mv: player.weapon.mv || 330, b: bulletQueue.splice(0) });
   if (coop()) { coopUpdate(dt); return; }
   if (net.isHost && inMatch() && remote.size > 0) game.clockStarted = true;
   const clockOn = inMatch() && !game.over && (net.isHost ? !!game.clockStarted : clockRunning);
@@ -713,55 +861,120 @@ function leaveOnline(reason) {
   if (game.state !== 'start') { game.state = 'start'; game.mode = 'solo'; setArena(false); resetGame(); hud.setGameplayVisible(false); }
   game.menu = false; lobby.status = reason || ''; screen = 'online'; showStart();
 }
-// every trip to the network starts here, so a typed address takes effect without a reload
-function useServer() { net.setServer(serverAddr); }
 async function createLobby(isPublic) {
   setStatus('opening a lobby…');
-  try { useServer(); await net.host({ isPublic }); }
+  try { await net.host({ isPublic }); }
   catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
-  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.players.clear(); lobby.players.set(net.id, { name: myName }); lobby.hostId = net.id; lobby.status = '';
+  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); lobby.players.set(net.id, { name: myName }); lobby.hostId = net.id; lobby.status = '';
   game.state = 'lobby'; screen = 'lobby'; showStart();
 }
 async function joinLobby(code) {
   setStatus('connecting…');
-  try { useServer(); await net.join(code, { name: myName }); } catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
+  try { await net.join(code, { name: myName }); } catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
   lobby.isPublic = net.isPublic; lobby.status = ''; game.state = 'lobby'; screen = 'lobby'; showStart();
 }
 async function quickPlay() {
-  try { useServer(); await net.quickJoin({ name: myName }, setStatus); lobby.isPublic = true; lobby.status = ''; game.state = 'lobby'; screen = 'lobby'; showStart(); return; }
+  try { await net.quickJoin({ name: myName }, setStatus); lobby.isPublic = true; lobby.status = ''; game.state = 'lobby'; screen = 'lobby'; showStart(); return; }
   catch (err) { if (!/no open public/.test(String(err.message))) { setStatus(friendlyError(err)); unlockButtons(); return; } }
   setStatus('no open lobbies · opening a public one for you…');
   await createLobby(true);
 }
 function friendlyError(err) {
   const m = String(err && err.message || err || ''); if (!m) return 'something went wrong';
-  const where = serverAddr ? serverAddr : 'this page’s own address';
   if (/not reachable|could not reach|did not answer|lost the connection|disconnected/.test(m)) {
-    return `could not reach the server at ${where} · check it is running (node server.js) and that you are both on the same network`;
+    return `could not reach ${sameOrigin()} · the server that handed you this page is not answering right now`;
   }
-  if (/closing bracket|does not look like an address|port does not look right/.test(m)) return m + ' · try 192.168.1.20, 192.168.1.20:8080 or [fd12::4]:8080';
-  if (/no lobby with that code/.test(m)) return 'no lobby with that code · check it with your friend, and that you are both on the same server';
+  if (/no lobby with that code/.test(m)) return 'no lobby with that code · check it with your friend';
   if (/full/.test(m)) return 'that lobby is full · try another code';
   if (/leave the lobby/.test(m)) return 'leave your lobby first';
   return m;
 }
-function setStatus(t) { lobby.status = t; const el = hud.el.panel.querySelector('#status'); if (el) el.textContent = t; }
+function setStatus(msg) { lobby.status = msg; const el = hud.el.panel.querySelector('#status'); if (el) el.textContent = ts(msg); }
 
 // ---------------- screens ----------------
+// "CLICK ANYWHERE (or press Space)" is nonsense on a phone, so the prompt follows the device.
+const goText = (verb) => (touchMode ? t`TAP TO ${verb}` : t`CLICK ANYWHERE (or press ${hud.key('confirm')}) TO ${verb}`);
+// which screen is up, so the language toggle can redraw it in the new language
+let redraw = null;
+function redrawScreen() { if (redraw) redraw(); }
+// Settings used to be a stack of four controls sitting under every menu. That was the right shape
+// for four; it is the wrong shape for a real FPS config, and on a phone it was most of the reason
+// the start screen needed scrolling. So the menus carry a door and the knobs live behind it.
 function settingsHTML() {
-  return `<div class="settings" id="settings">
-    <label>look sensitivity <input type="range" id="setSens" min="25" max="250" step="5" value="${settings.sens}"><b id="setSensV">${settings.sens}%</b></label>
-    <label><input type="checkbox" id="setInv" ${settings.invert ? 'checked' : ''}> invert vertical look</label>
-    <label><input type="checkbox" id="setMus" ${musicWanted ? 'checked' : ''}> music <span class="k">(M)</span></label>
-  </div>`;
+  return `<div class="settings" id="settings"><button type="button" class="cfgopen" id="cfgBtn">SETTINGS<i>sensitivity · field of view · aim · language</i></button></div>`;
 }
 function wireSettings() {
   const box = hud.el.panel.querySelector('#settings'); if (!box) return;
-  box.addEventListener('click', (e) => e.stopPropagation()); box.addEventListener('keydown', (e) => e.stopPropagation());
-  const sens = box.querySelector('#setSens'), out = box.querySelector('#setSensV');
-  sens.addEventListener('input', () => { settings.sens = Number(sens.value); out.textContent = settings.sens + '%'; applySettings(); });
-  box.querySelector('#setInv').addEventListener('change', (e) => { settings.invert = e.target.checked; applySettings(); });
-  box.querySelector('#setMus').addEventListener('change', (e) => { musicWanted = e.target.checked; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); });
+  box.addEventListener('click', (e) => e.stopPropagation());
+  box.querySelector('#cfgBtn').addEventListener('click', () => openConfig());
+}
+
+// ---------------- config ----------------
+// Which screen the config was opened over. It doubles as the "config is up" flag: while it is set,
+// a click on the backdrop or a tap of space backs out of here instead of starting a round.
+let cfgBack = null;
+function openConfig() { cfgBack = redraw || showStart; showConfig(); }
+function closeConfig() { const back = cfgBack || showStart; cfgBack = null; back(); }
+function showConfig() { redraw = showConfig; hud.showScreen(configHTML()); wireConfig(); }
+
+// Range rows carry their own key, so the whole panel is one delegated `input` listener and adding a
+// knob is one line here plus one line in settings.js.
+function cfgRow(k, label, note) {
+  const d = SETTINGS[k], v = settings[k];
+  return `<label class="cfgrow"><span class="cfgname">${label}${note ? `<i>${note}</i>` : ''}</span>`
+    + `<input type="range" data-k="${k}" min="${d.min}" max="${d.max}" step="${d.step}" value="${v}"><b data-v="${k}">${v}${d.unit}</b></label>`;
+}
+function cfgCheck(id, on, label, note) {
+  return `<label class="cfgrow chk"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span class="cfgname">${label}${note ? `<i>${note}</i>` : ''}</span></label>`;
+}
+function configHTML() {
+  return `<h1>CONFIG</h1><h2>every knob is live · move one and the game moves with it</h2>
+  <div class="config" id="config">
+    <div class="cfgcol"><div class="cfghead">LOOK</div>
+      ${cfgRow('sens', 'look sensitivity', touchMode ? 'how far the view turns per inch of thumb' : 'how far the view turns per inch of mouse')}
+      ${cfgRow('adsSens', 'aim sensitivity', 'share of the above while sighted down a gun')}
+      ${cfgRow('scopeSens', 'scope sensitivity', 'share of the above through the sniper scope')}
+      ${cfgRow('fov', 'field of view', 'wider sees more of the fight · narrower reads further down the street')}
+      ${cfgCheck('setInv', settings.invert, 'invert vertical look')}
+    </div>
+    <div class="cfgcol"><div class="cfghead">FEEL</div>
+      ${cfgRow('adsSpeed', 'move speed while aiming', '100% is full walking speed, the same as not aiming')}
+      ${touchMode ? cfgRow('aimAssist', 'aim assist', 'how hard the view leans toward what it thinks you meant') : ''}
+      ${cfgRow('shake', 'screen shake', 'how hard an explosion kicks the camera')}
+      ${cfgRow('bob', 'view bob', 'how much the view rocks as you run')}
+    </div>
+    <div class="cfgcol"><div class="cfghead">GAME</div>
+      ${cfgCheck('setMus', musicWanted, 'music', '(M)')}
+      ${cfgCheck('setBal', settings.ballistics, 'bullet drop &amp; travel time', '(solo · in a lobby the host decides)')}
+      <label class="cfgrow seg"><span class="cfgname">difficulty<i>${ts('how fast you heal and how long your legs last')} · ${ts('(solo · in a lobby the host decides)')}</i></span><span class="langsel" id="setDiff">${Object.entries(DIFFICULTY).map(([k, d]) => `<button type="button" class="langbtn${k === settings.difficulty ? ' on' : ''}" data-diff="${k}" title="${ts(d.blurb)}">${ts(d.name)}</button>`).join('')}</span></label>
+      <div class="cfgnote" id="diffNote">${ts(diffOf(settings.difficulty).blurb)}</div>
+      <label class="cfgrow lang"><span class="cfgname">language</span><span class="langsel" id="setLang">${Object.entries(LANGS).map(([k, n]) => `<button type="button" class="langbtn${k === getLang() ? ' on' : ''}" data-lang="${k}">${n}</button>`).join('')}</span></label>
+    </div>
+  </div>
+  <div class="online cfgfoot"><div class="row"><button type="button" class="alt" id="cfgReset">RESET TO DEFAULTS</button><button type="button" id="cfgBack">BACK</button><span class="hint">language and music stay as you left them</span></div></div>`;
+}
+function wireConfig() {
+  const p = hud.el.panel, box = p.querySelector('#config'); if (!box) return;
+  // one guard for the whole panel: a click that reaches #screen resumes the game
+  p.addEventListener('click', (e) => e.stopPropagation()); p.addEventListener('keydown', (e) => e.stopPropagation());
+  box.addEventListener('input', (e) => {
+    const r = e.target.closest('input[type=range]'); if (!r) return;
+    const k = r.dataset.k; settings[k] = Number(r.value);
+    box.querySelector(`b[data-v="${k}"]`).textContent = settings[k] + SETTINGS[k].unit;
+    applySettings();
+  });
+  p.querySelector('#setInv').addEventListener('change', (e) => { settings.invert = e.target.checked; applySettings(); });
+  p.querySelector('#setMus').addEventListener('change', (e) => { musicWanted = e.target.checked; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); });
+  p.querySelector('#setBal').addEventListener('change', (e) => { settings.ballistics = e.target.checked; applySettings(); });
+  p.querySelector('#setDiff').addEventListener('click', (e) => {
+    const b = e.target.closest('.langbtn'); if (!b) return;
+    settings.difficulty = b.dataset.diff; applySettings();
+    for (const x of p.querySelectorAll('#setDiff .langbtn')) x.classList.toggle('on', x.dataset.diff === settings.difficulty);
+    p.querySelector('#diffNote').textContent = ts(diffOf(settings.difficulty).blurb);
+  });
+  p.querySelector('#setLang').addEventListener('click', (e) => { const b = e.target.closest('.langbtn'); if (b) { setLang(b.dataset.lang); redrawScreen(); } });
+  p.querySelector('#cfgReset').addEventListener('click', () => { for (const k in SETTINGS) settings[k] = SETTINGS[k].def; applySettings(); showConfig(); });
+  p.querySelector('#cfgBack').addEventListener('click', () => closeConfig());
 }
 function wireName(box) {
   const nb = box.querySelector('#setName'); if (!nb) return;
@@ -770,55 +983,72 @@ function wireName(box) {
 function checkpointHTML() {
   if (checkpoint < 5) return '';
   let h = '<div class="checkpoints"><span>checkpoints</span>';
-  for (let w = 5; w <= checkpoint; w += 5) h += `<button type="button" data-cp="${w}">WAVE ${w}</button>`;
+  for (let w = 5; w <= checkpoint; w += 5) h += `<button type="button" data-cp="${w}">${t`WAVE ${w}`}</button>`;
   return h + '</div>';
 }
 function wireCheckpoints(onGo) { const box = hud.el.panel.querySelector('.checkpoints'); if (!box) return; box.addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('button'); if (b) onGo(Number(b.dataset.cp)); }); }
 const mapName = (k) => (LEVELS.find((m) => m.key === k) || LEVELS[0]).name;
-function mapHTML(sel, canPick) { if (LEVELS.length < 2) return ''; return `<div class="mapsel" id="mapsel"><span>map</span>${LEVELS.map((m) => `<button type="button" class="mapbtn${m.key === sel ? ' on' : ''}" data-map="${m.key}" ${canPick ? '' : 'disabled'}>${m.name}<i>${m.blurb}</i></button>`).join('')}</div>`; }
+function mapHTML(sel, canPick, ffa = false) { const list = arenaMaps(ffa); if (list.length < 2) return ''; return `<div class="mapsel" id="mapsel"><span>map</span>${list.map((m) => `<button type="button" class="mapbtn${m.key === sel ? ' on' : ''}" data-map="${m.key}" ${canPick ? '' : 'disabled'}>${m.name}<i>${m.blurb}</i></button>`).join('')}</div>`; }
 function wireMap(onPick) { const box = hud.el.panel.querySelector('#mapsel'); if (!box) return; box.addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('.mapbtn'); if (b && !b.disabled) onPick(b.dataset.map); }); }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
 function mainHTML() {
   return `<h1>DOODLE DISTRICT</h1><h2>a scribbled survival shooter</h2>
     <div class="mainbtns"><button type="button" class="start" id="soloBtn">START<i>solo · survive the waves</i></button><button type="button" id="onlineBtn">PLAY ONLINE<i>free for all or squad survival · up to 10 players</i></button></div>
-    ${mapHTML(mapKey, true)}${CONTROLS_HTML}${settingsHTML()}${checkpointHTML()}${best ? `<div class="beststat">best score: ${best}</div>` : ''}`;
+    ${mapHTML(mapKey, true)}${touchMode ? TOUCH_CONTROLS_HTML : CONTROLS_HTML}${settingsHTML()}${checkpointHTML()}${best ? `<div class="beststat">${t`best score: ${best}`}</div>` : ''}`;
 }
 const sameOrigin = () => (typeof location !== 'undefined' && /^https?:$/.test(location.protocol) ? location.host : 'localhost:8080');
 function onlineHTML() {
   return `<h1>PLAY ONLINE</h1><h2>free for all or squad survival · up to 10 players on your network</h2>
     <div class="online" id="online">
       <div class="row"><span>your name</span><input type="text" class="namebox" id="setName" maxlength="14" value="${esc(myName)}"></div>
-      <div class="row"><span>server</span><input type="text" id="serverBox" placeholder="${esc(sameOrigin())}" value="${esc(serverAddr)}" autocomplete="off" spellcheck="false"><button type="button" class="alt" id="serverBtn">USE</button></div>
-      <div class="hint">the machine running <b>node server.js</b>. Empty means the one that served this page. On a local network type its address: <b>192.168.1.20</b>, <b>192.168.1.20:8080</b>, or IPv6 as <b>fd12::4</b> / <b>[fd12::4]:8080</b>.</div>
       <div class="row"><button type="button" class="big" id="quickBtn">QUICK PLAY</button><span class="hint">jumps into an open public lobby, or opens one for you</span></div>
       <div class="row split"><span>or</span></div>
       <div class="row"><button type="button" id="createBtn">CREATE LOBBY</button><div class="radio"><label><input type="radio" name="vis" value="public" ${lobby.isPublic ? 'checked' : ''}> public</label><label><input type="radio" name="vis" value="private" ${lobby.isPublic ? '' : 'checked'}> private · friends only</label></div></div>
       <div class="row"><span>have a code?</span><input type="text" id="codeBox" placeholder="CODE" maxlength="5" autocomplete="off"><button type="button" id="joinBtn">JOIN</button></div>
       <div class="lobbylist" id="lobbylist"><div class="row"><span>public lobbies</span><button type="button" class="alt" id="refreshBtn">REFRESH</button></div><div class="rows" id="lobbyRows">${lobbyListHTML()}</div></div>
       <div class="status" id="status">${esc(lobby.status || '')}</div>
-      ${lobby.rejoinCode ? `<div class="row"><button type="button" class="big" id="rejoinBtn">REJOIN ${esc(lobby.rejoinCode)}</button></div>` : ''}
+      ${lobby.rejoinCode ? `<div class="row"><button type="button" class="big" id="rejoinBtn">${t`REJOIN ${esc(lobby.rejoinCode)}`}</button></div>` : ''}
       <div class="row"><button type="button" class="alt" id="backBtn">BACK</button></div>
     </div>`;
 }
 function modeHTML(sel, canPick) {
   const modes = [
-    { key: 'ffa', name: 'FREE FOR ALL', blurb: `everyone against everyone · first to ${FFA_TARGET}` },
+    { key: 'ffa', name: 'FREE FOR ALL', blurb: t`everyone against everyone · first to ${FFA_TARGET}` },
     { key: 'coop', name: 'SQUAD SURVIVAL', blurb: 'all of you against the waves · bigger the squad, bigger the waves' },
   ];
   return `<div class="modesel" id="modesel"><span>mode</span>${modes.map((m) => `<button type="button" class="modebtn${m.key === sel ? ' on' : ''}" data-mode="${m.key}" ${canPick ? '' : 'disabled'}>${m.name}<i>${m.blurb}</i></button>`).join('')}</div>`;
 }
+function diffHTML(sel, canPick) {
+  return `<div class="modesel" id="diffsel"><span>difficulty</span>${Object.entries(DIFFICULTY).map(([k, d]) => `<button type="button" class="modebtn${k === sel ? ' on' : ''}" data-diff="${k}" ${canPick ? '' : 'disabled'}>${ts(d.name)}<i>${ts(d.blurb)}</i></button>`).join('')}</div>`;
+}
+// Versus only. In squad survival you are fighting the waves and you need every bit of the kit, so
+// this row is simply not there.
+function mobHTML(sel, canPick) {
+  return `<div class="modesel" id="mobsel"><span>${ts('movement')}</span>${Object.entries(MOBILITY).map(([k, m]) => `<button type="button" class="modebtn${k === sel ? ' on' : ''}" data-mob="${k}" ${canPick ? '' : 'disabled'}>${ts(m.name)}<i>${ts(m.blurb)}</i></button>`).join('')}</div>`;
+}
+function ballHTML(sel, canPick) {
+  const opts = [
+    { on: false, name: 'INSTANT', blurb: 'a shot lands where you aimed, the moment you fire' },
+    { on: true, name: 'BALLISTIC', blurb: 'rounds fly and fall · lead them, hold over them' },
+  ];
+  return `<div class="modesel" id="ballsel"><span>shots</span>${opts.map((o) => `<button type="button" class="modebtn${o.on === !!sel ? ' on' : ''}" data-bal="${o.on ? '1' : '0'}" ${canPick ? '' : 'disabled'}>${o.name}<i>${o.blurb}</i></button>`).join('')}</div>`;
+}
 function lobbyHTML() {
   const rows = lobbyRows(); const host = net.isHost; const n = rows.length; const isCoop = lobby.gameMode === 'coop';
-  return `<h1>LOBBY</h1><h2>${isCoop ? 'squad survival · you against the page' : 'free for all · first to ' + FFA_TARGET} · ${n}/${net.maxPlayers} players</h2>
+  const blurb = isCoop ? ts('squad survival · you against the page') : t`free for all · first to ${FFA_TARGET}`;
+  return `<h1>LOBBY</h1><h2>${t`${blurb} · ${n}/${net.maxPlayers} players`}</h2>
     <div class="online" id="online">
       <div class="row"><span>code</span><span class="code">${String(net.isHost ? (net.aliasCode || net.code) : (lobby.shown || net.code) || '').replace(/-\d+$/, '')}</span></div>
       ${modeHTML(lobby.gameMode, host)}
-      ${mapHTML(lobby.map || mapKey, host)}
+      ${mapHTML(playable(lobby.map || mapKey, !isCoop), host, !isCoop)}
+      ${ballHTML(lobby.ballistics, host)}
+      ${diffHTML(ctx.difficulty(), host)}
+      ${isCoop ? '' : mobHTML(lobby.mob || 'mid', host)}
       <div class="hint">${lobby.isPublic ? 'this lobby is public: anyone can quick play in, or type the code' : 'private lobby: friends type this code under PLAY ONLINE → JOIN'}</div>
       <div class="plist">${rows.map((p) => `<div class="${p.id === lobby.hostId ? 'host' : ''}${p.id === net.id ? ' me' : ''}"><span>${esc(p.name)}</span><span>${p.id === net.id ? 'you' : ''}</span></div>`).join('')}</div>
       <div class="row"><button type="button" class="big" id="startBtn">START MATCH</button><button type="button" class="alt" id="leaveBtn">LEAVE</button></div>
-      <div class="status" id="status">${esc(lobby.status || '')}</div><div class="hint">anyone can start${host ? '' : ' · only the host picks the mode and map'} · ${n < 2 ? 'people can still join once it is running' : n + ' players in'}</div>
+      <div class="status" id="status">${esc(lobby.status || '')}</div><div class="hint">${(() => { const tail = n < 2 ? ts('people can still join once it is running') : t`${n} players in`; return host ? t`anyone can start · ${tail}` : t`anyone can start · only the host picks the mode and map · ${tail}`; })()}</div>
     </div>`;
 }
 let lobbyList = null, listBusy = false;
@@ -826,12 +1056,12 @@ function lobbyListHTML() {
   if (listBusy) return '<div class="hint">looking…</div>';
   if (!lobbyList) return '<div class="hint">press refresh to look for open lobbies</div>';
   if (!lobbyList.length) return '<div class="hint">hit QUICK PLAY to join a lobby</div>';
-  return lobbyList.map((l) => `<div class="lobbyrow"><span class="code">${esc(l.code)}</span><span>${esc(l.hostName || 'someone')}'s lobby</span><span>${l.players}/${l.max}${l.inMatch ? ' · in a match' : ''}</span>${l.full ? '<span class="status">full</span>' : `<button type="button" data-join="${esc(l.code)}">JOIN</button>`}</div>`).join('');
+  return lobbyList.map((l) => `<div class="lobbyrow"><span class="code">${esc(l.code)}</span><span>${t`${esc(l.hostName || ts('someone'))}'s lobby`}</span><span>${l.inMatch ? t`${l.players}/${l.max} · in a match` : `${l.players}/${l.max}`}</span>${l.full ? '<span class="status">full</span>' : `<button type="button" data-join="${esc(l.code)}">JOIN</button>`}</div>`).join('');
 }
 async function refreshLobbies() {
-  if (listBusy || net.active) return; listBusy = true; const box = hud.el.panel.querySelector('#lobbyRows'); if (box) box.innerHTML = lobbyListHTML();
-  let err = null; try { useServer(); lobbyList = await net.listLobbies({ name: myName }); } catch (e) { lobbyList = []; err = e; }
-  listBusy = false; const rows = hud.el.panel.querySelector('#lobbyRows'); if (rows) rows.innerHTML = err ? `<div class="hint">could not look: ${esc(friendlyError(err))}</div>` : lobbyListHTML();
+  if (listBusy || net.active) return; listBusy = true; const box = hud.el.panel.querySelector('#lobbyRows'); if (box) { box.innerHTML = lobbyListHTML(); trDom(box); }
+  let err = null; try { lobbyList = await net.listLobbies({ name: myName }); } catch (e) { lobbyList = []; err = e; }
+  listBusy = false; const rows = hud.el.panel.querySelector('#lobbyRows'); if (rows) rows.innerHTML = err ? `<div class="hint">${t`could not look: ${esc(friendlyError(err))}`}</div>` : lobbyListHTML(); if (rows) trDom(rows);
 }
 function wireOnline() {
   const box = hud.el.panel.querySelector('#online'); if (!box) return;
@@ -840,23 +1070,10 @@ function wireOnline() {
   if (q('quickBtn')) q('quickBtn').addEventListener('click', () => { lockButtons(box); quickPlay(); });
   if (q('createBtn')) q('createBtn').addEventListener('click', () => { lockButtons(box); createLobby(box.querySelector('input[name=vis]:checked').value === 'public'); });
   if (q('joinBtn')) { q('joinBtn').addEventListener('click', () => { const c = q('codeBox').value.trim().toUpperCase(); if (!c) { setStatus('type the code your friend gave you'); return; } lockButtons(box); joinLobby(c); }); q('codeBox').addEventListener('keydown', (e) => { if (e.key === 'Enter') q('joinBtn').click(); }); }
-  if (q('serverBox')) {
-    const sb = q('serverBox');
-    const apply = () => {
-      const next = sb.value.trim();
-      if (next === serverAddr) { setStatus(''); return; }
-      // check it parses before we keep it, so a typo says so here instead of timing out later
-      try { serverURL(next); } catch (err) { setStatus(String(err.message)); return; }
-      serverAddr = next; localStorage.setItem('doodle_server', serverAddr);
-      net.disconnect(); lobbyList = null;                 // the old list belonged to the old server
-      setStatus(serverAddr ? 'using ' + serverAddr : 'using this page’s own server');
-      refreshLobbies();
-    };
-    sb.addEventListener('change', apply);
-    sb.addEventListener('keydown', (e) => { if (e.key === 'Enter') apply(); });
-    if (q('serverBtn')) q('serverBtn').addEventListener('click', apply);
-  }
-  if (q('modesel')) q('modesel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.gameMode = b.dataset.mode === 'coop' ? 'coop' : 'ffa'; broadcastLobby(); });
+  if (q('modesel')) q('modesel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.gameMode = b.dataset.mode === 'coop' ? 'coop' : 'ffa'; lobby.map = playable(lobby.map || mapKey, lobby.gameMode !== 'coop'); broadcastLobby(); });
+  if (q('ballsel')) q('ballsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.ballistics = b.dataset.bal === '1'; broadcastLobby(); });
+  if (q('diffsel')) q('diffsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.diff = b.dataset.diff; applyRules(); broadcastLobby(); });
+  if (q('mobsel')) q('mobsel').addEventListener('click', (e) => { const b = e.target.closest('.modebtn'); if (!b || b.disabled || !net.isHost) return; lobby.mob = b.dataset.mob; applyRules(); broadcastLobby(); });
   if (q('rejoinBtn')) q('rejoinBtn').addEventListener('click', () => { const c = lobby.rejoinCode; lobby.rejoinCode = null; lockButtons(box); joinLobby(c); });
   if (q('backBtn')) q('backBtn').addEventListener('click', () => { lobby.status = ''; lobby.rejoinCode = null; screen = 'main'; showStart(); });
   if (q('refreshBtn')) { q('refreshBtn').addEventListener('click', () => refreshLobbies()); if (!lobbyList && !listBusy) refreshLobbies(); }
@@ -869,7 +1086,7 @@ function lockButtons(box) { for (const b of box.querySelectorAll('button')) if (
 function unlockButtons() { const box = hud.el.panel.querySelector('#online'); if (box) for (const b of box.querySelectorAll('button')) b.disabled = false; }
 function renderLobby() { if (game.state === 'lobby') showStart(); }
 function showStart() {
-  hud.setGameplayVisible(false);
+  redraw = showStart; cfgBack = null; hud.setGameplayVisible(false);
   if (game.state === 'lobby') screen = 'lobby';
   const html = screen === 'lobby' ? lobbyHTML() : screen === 'online' ? onlineHTML() : mainHTML();
   hud.showScreen(html);
@@ -881,17 +1098,19 @@ function showStart() {
   } else wireOnline();
 }
 function showPause() {
+  redraw = showPause; cfgBack = null;
   if (online()) {
-    hud.showScreen(`<h1>MENU</h1><h2>free for all · lobby ${String(net.aliasCode || net.code || '').replace(/-\d+$/, '')}</h2><div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}"><span>${esc(s.name)}</span><span>${s.kills} K · ${s.deaths} D</span></div>`).join('')}</div>${CONTROLS_HTML}${settingsHTML()}<div class="online" id="online"><div class="row"><button type="button" class="alt" id="leaveBtn">LEAVE MATCH</button></div></div><div class="go">CLICK ANYWHERE (or press ${hud.key('confirm')}) TO KEEP PLAYING</div>`);
+    hud.showScreen(`<h1>MENU</h1><h2>${t`free for all · lobby ${String(net.aliasCode || net.code || '').replace(/-\d+$/, '')}`}</h2><div class="scoreboard">${sortedScores().map(([id, s]) => `<div class="${id === net.id ? 'me' : ''}"><span>${esc(s.name)}</span><span>${t`${s.kills} K · ${s.deaths} D`}</span></div>`).join('')}</div>${CONTROLS_HTML}${settingsHTML()}<div class="online" id="online"><div class="row"><button type="button" class="alt" id="leaveBtn">LEAVE MATCH</button></div></div><div class="go">${goText(ts('KEEP PLAYING'))}</div>`);
     wireSettings(); wireOnline(); return;
   }
-  hud.showScreen(`<h1>PAUSED</h1><h2>wave ${game.wave} · score ${game.score}</h2>${CONTROLS_HTML}${settingsHTML()}${menuBtnHTML()}<div class="go">CLICK ANYWHERE (or press ${hud.key('confirm')}) TO RESUME</div>`);
+  hud.showScreen(`<h1>PAUSED</h1><h2>${t`wave ${game.wave} · score ${game.score}`}</h2>${CONTROLS_HTML}${settingsHTML()}${menuBtnHTML()}<div class="go">${goText(ts('RESUME'))}</div>`);
   wireSettings(); wireMenuBtn();
 }
-function showClickToPlay() { hud.showScreen(`<h1>MATCH ON</h1><h2>free for all · first to ${FFA_TARGET}</h2><div class="go">CLICK ANYWHERE (or press ${hud.key('confirm')}) TO PLAY</div>`); }
+function showClickToPlay() { redraw = showClickToPlay; cfgBack = null; hud.showScreen(`<h1>MATCH ON</h1><h2>${t`free for all · first to ${FFA_TARGET}`}</h2><div class="go">${goText(ts('PLAY'))}</div>`); }
 function showDead() {
-  hud.setGameplayVisible(false); const nb = game.score > best; if (nb) { best = game.score; localStorage.setItem('doodle_best', String(best)); }
-  hud.showScreen(`<h1>ERASED</h1><div class="stats">you survived <b>${game.wave}</b> wave${game.wave === 1 ? '' : 's'} · <b>${game.kills}</b> kills · score <b>${game.score}</b>${nb ? ' · <b>NEW BEST</b>' : ` · best ${best}`}</div>${checkpointHTML()}${menuBtnHTML()}<div class="go">CLICK (or press ${hud.key('confirm')}) TO DRAW AGAIN</div>`);
+  redraw = showDead; cfgBack = null; hud.setGameplayVisible(false); const nb = game.score > best; if (nb) { best = game.score; localStorage.setItem('doodle_best', String(best)); }
+  const endTail = nb ? ts(' · <b>NEW BEST</b>') : t` · best ${best}`;
+  hud.showScreen(`<h1>ERASED</h1><div class="stats">${t`you survived <b>${game.wave}</b> wave${game.wave === 1 ? '' : 's'} · <b>${game.kills}</b> kills · score <b>${game.score}</b>`}${endTail}</div>${checkpointHTML()}${menuBtnHTML()}<div class="go">${goText(ts('DRAW AGAIN'))}</div>`);
   wireCheckpoints((w) => beginAtWave(w)); wireMenuBtn();
 }
 function menuBtnHTML() { return '<div class="online menubtn"><div class="row"><button type="button" class="alt" id="menuBtn">MAIN MENU</button></div></div>'; }
@@ -902,24 +1121,29 @@ function toLobbyScreen() { net.inMatch = false; for (const r of remote.values())
 // ---------------- run control ----------------
 function resetGame() {
   if (level.breakables.some((b) => !b.alive)) setLevel(loadedKey, arenaLoaded, true);
-  enemies.clear(); effects.clear(); for (const p of pickups) R.scene.remove(p.mesh); pickups.length = 0; pickupClock = 0;
+  enemies.clear(); effects.clear(); bullets.clear(); for (const p of pickups) R.scene.remove(p.mesh); pickups.length = 0; ammoClock = 0; healthClock = 20;
   // whoever hosts next owns its own enemies again; startMatch turns mirroring back on if it has to
   enemies.mirror = false; enemies.nextId = 1; snapT = 0; coopScoreT = 0; coopSyncT = 0; coopLeft = 0;
-  player.maxHp = online() ? 110 : 120; player.regenDelay = online() ? 4 : 4.5; player.regenRate = online() ? 14 : 11;
-  player.reset(level.playerStart); player.name = myName; player.lastHitBy = null; player.lastHit = null; enemies.mods.speed = 1; enemies.mods.damage = 1; hud.setModifier(''); hud.setBoss(null, null); game.boss = null; endFocus(); game.katanaStreak = 0;
+  player.maxHp = online() ? 110 : 120;
+  // The difficulty owns the two regen numbers now, so it has to be applied after the reset rather
+  // than before it. Online keeps its old edge over solo as a ratio on top of whatever tier is set --
+  // at EASY that lands back on exactly the 4s/14hp it has always used, and EXTREME still never heals.
+  applyRules();
+  if (online() && player.regenRate > 0) { player.regenDelay *= 4 / 4.5; player.regenRate *= 14 / 11; }
+  player.reset(level.playerStart); player.name = myName; player.lastHitBy = null; player.lastHit = null; enemies.mods.speed = 1; enemies.mods.damage = 1; hud.setModifier(''); hud.setBoss(null, null); game.boss = null; endFocus(); game.katanaStreak = 0; game.rocketDropped = false;
   game.score = 0; game.kills = 0; game.combo = 0; game.wave = 0; game.intermission = 0; game.queue = []; game.time = 0; game.over = null; game.matchT = 0; hud.setScore(0, 0); hud.setTimer(''); hud.setPvpScore(null); hud.setWave(1, 0); hud.setBoard(null);
 }
-function beginCommon() { audio.init(); audio.resume(); if (!input.usingGamepad) input.requestLock(); if (musicWanted && !audio.musicPlaying) audio.musicOn(true); hud.hideScreen(); hud.setGameplayVisible(true); game.menu = false; }
+function beginCommon() { audio.init(); audio.resume(); if (!input.usingGamepad && !touchMode) input.requestLock(); if (musicWanted && !audio.musicPlaying) audio.musicOn(true); hud.hideScreen(); hud.setGameplayVisible(true); game.menu = false; }
 function begin() { game.mode = 'solo'; setArena(false); beginCommon(); if (game.state === 'start' || game.state === 'dead') { resetGame(); startWave(1); } game.state = 'play'; }
 function beginAtWave(n) { game.mode = 'solo'; setArena(false); beginCommon(); resetGame(); startWave(n); game.state = 'play'; }
-function jumpToWave(n) { enemies.clear(); effects.clear(); enemies.mods.speed = 1; enemies.mods.damage = 1; endFocus(); game.intermission = 0; game.queue = []; startWave(n); hud.hideScreen(); hud.setGameplayVisible(true); game.state = 'play'; game.menu = false; audio.reelLoop(false); }
+function jumpToWave(n) { enemies.clear(); effects.clear(); bullets.clear(); enemies.mods.speed = 1; enemies.mods.damage = 1; endFocus(); game.intermission = 0; game.queue = []; startWave(n); hud.hideScreen(); hud.setGameplayVisible(true); game.state = 'play'; game.menu = false; audio.reelLoop(false); }
 function hostStart() {
   scores.clear(); for (const [id, p] of lobby.players) scores.set(id, { name: p.name, kills: 0, deaths: 0 });
   const mode = lobby.gameMode === 'coop' ? 'coop' : 'ffa';
   // deal everyone a different spot, shuffled so the same people do not always start together
   setArena(mode === 'ffa'); const order = spawnSpots().map((_, i) => i); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
   const spawns = {}; [...lobby.players.keys()].forEach((id, i) => { spawns[id] = order[i % order.length]; });
-  net.send('start', { spawns, map: lobby.map || mapKey, mode }); startMatch(false, spawns[net.id], mode); sendScores();
+  net.send('start', { spawns, map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob }); startMatch(false, spawns[net.id], mode); sendScores();
   if (mode === 'coop') startWave(1);
 }
 function startMatch(late, spawnIdx, mode = 'ffa') {
@@ -935,13 +1159,18 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
   if (isCoop) hud.message('SQUAD SURVIVAL', late ? 'you joined a run in progress' : teamSize() + ' of you against the page · they come harder in a crowd', 3);
   else hud.message('FREE FOR ALL', late ? 'you joined a match in progress' : 'first to ' + FFA_TARGET + ' · ' + Math.round(FFA_TIME / 60) + ' minutes · everyone is fair game', 3);
   hud.tip(`hold <b>${hud.key('score')}</b> for the scoreboard`, 5);
+  // Say out loud what the legs can do this match. A dash that silently does nothing reads as a bug.
+  if (!isCoop) setTimeout(() => { if (game.state === 'play') hud.tip(ts('movement') + ': <b>' + ts(mobOf(ctx.mobility()).name) + '</b> · ' + ts(mobOf(ctx.mobility()).blurb), 4); }, 5200);
   // a match started by someone else's click cannot grab the mouse: ask for a click
   setTimeout(() => { if (game.state === 'play' && !input.pointerLocked && !input.usingGamepad) { game.menu = true; showClickToPlay(); } }, 250);
 }
 function pause() { if ((game.state !== 'play' && !(game.state === 'dying' && online())) || game.menu) return; if (!online()) game.state = 'pause'; game.menu = true; showPause(); audio.reelLoop(false); }
-function resume() { if (online()) { game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad) input.requestLock(); return; } begin(); }
-Object.assign(window.__game, { startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
+function resume() { if (online()) { game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad && !touchMode) input.requestLock(); return; } begin(); }
+Object.assign(window.__game, { startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
 hud.onScreenClick = () => {
+  // the config sits on top of whatever screen opened it, so anything that would have dismissed that
+  // screen dismisses the config first - backdrop, space bar, escape
+  if (cfgBack) { closeConfig(); return; }
   const st = game.state;
   if (st === 'over') { if (net.isHost) { net.send('backtolobby', {}); toLobbyScreen(); } return; }
   if (st === 'lobby') return;
@@ -949,8 +1178,8 @@ hud.onScreenClick = () => {
   if ((st === 'play' || st === 'dying') && game.menu) { resume(); return; }
   if (st === 'pause' || st === 'dead') resume();
 };
-canvas.addEventListener('click', () => { if (game.state === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad) input.requestLock(); });
-input.onLockChange = (locked) => { if (!locked && (game.state === 'play' || (game.state === 'dying' && online())) && !game.menu && !input.usingGamepad) pause(); };
+canvas.addEventListener('click', () => { if (game.state === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad && !touchMode) input.requestLock(); });
+input.onLockChange = (locked) => { if (!locked && !touchMode && (game.state === 'play' || (game.state === 'dying' && online())) && !game.menu && !input.usingGamepad) pause(); };
 input.onDeviceChange = (pad) => { hud.setDevice(pad); hud.setWeapon(player.weapon.name, player.weapon.hint); };
 window.addEventListener('pagehide', () => { if (net.active) net.leave(); });
 // browsers only let audio start on a gesture; any press wakes the context if it went to sleep
@@ -966,17 +1195,25 @@ setInterval(() => { if (net.active && performance.now() - last > 300) step(perfo
 function step(now) {
   // never more than 50 ms a step: a bigger jump (a tab coming back) makes the springs in the view model fly apart
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  // the thumbs are folded in first so Input.update sees them alongside the keyboard and the pad
+  if (touch) { touch.setActive((game.state === 'play' || game.state === 'dying') && !game.menu); touch.update(); }
   input.update(dt);
   const st = game.state; const playing = st === 'play' || st === 'dying';
-  if (st === 'start' || st === 'pause' || st === 'dead' || st === 'over') { if (input.pressed('jump') || input.pressed('confirm') || (st === 'pause' && input.pressed('pause'))) hud.onScreenClick(); }
+  // the config screen eats every key that would otherwise dismiss the screen underneath it
+  if (cfgBack) { if (input.pressed('jump') || input.pressed('confirm') || input.pressed('pause')) closeConfig(); }
+  else if (st === 'start' || st === 'pause' || st === 'dead' || st === 'over') { if (input.pressed('jump') || input.pressed('confirm') || (st === 'pause' && input.pressed('pause'))) hud.onScreenClick(); }
   else if ((st === 'play' || (st === 'dying' && online())) && input.pressed('pause')) { if (game.menu) resume(); else { pause(); input.exitLock(); } }
   else if ((st === 'play' || st === 'dying') && game.menu && (input.pressed('jump') || input.pressed('confirm'))) resume();
-  if (input.pressed('music')) { musicWanted = !musicWanted; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); hud.tip(musicWanted ? 'music on' : 'music off', 1.5); }
+  if (input.pressed('music')) { musicWanted = !musicWanted; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); hud.tip(musicWanted ? 'music on' : 'music off', 1.5); const mc = hud.el.panel.querySelector('#setMus'); if (mc) mc.checked = musicWanted; }
   if (online() && playing) {
     if (input.usingGamepad && input.pressed('score')) boardToggle = !boardToggle;
-    const want = ((input.down('score') && !input.usingGamepad) || boardToggle) && !game.menu; if (want !== !hud.el.board.hidden) hud.setBoard(want ? boardHTML() : null);
+    const want = ((input.down('score') && !input.usingGamepad) || boardToggle) && !game.menu;
+    // the board is not a snapshot while it is held open: the ping column is live, and a column
+    // that froze on whatever it read the instant you pressed Tab would be worse than none
+    if (want !== !hud.el.board.hidden) { hud.setBoard(want ? boardHTML() : null); boardT = 0; }
+    else if (want) { boardT += dt; if (boardT > 0.5) { boardT = 0; hud.setBoard(boardHTML()); } }
   } else boardToggle = false;
-  if (st === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad) { lockTipT -= dt; if (lockTipT <= 0) { lockTipT = 2.5; hud.tip('click the page to grab the mouse', 2); } }
+  if (st === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad && !touchMode) { lockTipT -= dt; if (lockTipT <= 0) { lockTipT = 2.5; hud.tip('click the page to grab the mouse', 2); } }
   let scale = 1;
   if (game.hitstopT > 0) { game.hitstopT -= dt; scale = game.hitstopScale; }
   else if (game.focus.active) scale = FOCUS_SCALE;
@@ -986,7 +1223,7 @@ function step(now) {
     game.time += sdt; if (player.shieldT > 0) player.shieldT -= dt;
     musicHealT -= dt; if (musicHealT <= 0) { musicHealT = 2; if (musicWanted && st === 'play' && !audio.musicPlaying && audio.ctx) audio.musicOn(true); if (input.anyInput) audio.resume(); }
     { const B = level.bounds, bp = player.body.pos; if (bp.x < B.minX - 8 || bp.x > B.maxX + 8 || bp.z < B.minZ - 8 || bp.z > B.maxZ + 8 || bp.y > 150) bp.y = -100; }
-    player.update(sdt); enemies.update(sdt); effects.update(sdt); updatePickups(sdt); netUpdate(dt);
+    player.update(sdt); bullets.update(sdt); enemies.update(sdt); effects.update(sdt); updatePickups(sdt); netUpdate(dt);
     // the co-op host runs the waves for the whole lobby; clients get told what came out of them
     if (st === 'play' && (!online() || coopHost())) updateWaves(sdt);
     if (online()) updateArenaPickups(dt);
@@ -1012,7 +1249,15 @@ function step(now) {
   for (const a of level.animated) a.update(game.time);
   audio.setListener(player.eye, player.right);
   const w = player.weapon; if (w.isGun) hud.setAmmo(w.mag, w.reserve, w.magSize, w.reloading); else hud.setKatana();
-  hud.setSlots(player.weapons.map((wp, i) => ({ name: wp.name, active: i === player.weaponIndex, ammo: wp.isGun ? wp.mag + '/' + wp.reserve : '∞', empty: wp.isGun && wp.mag === 0 && wp.reserve === 0 })));
+  if (touch && !w.isGun) touch.clearAim();   // the katana has nothing to scope, so drop the toggle
+  // the ring by the crosshair, reading whichever wait the gun is currently in
+  if (w.isGun && w.reloading) hud.setCycle(w.reloadT / w.reloadDur, 'reload');
+  else if (w.isGun && w.pumpT > 0) hud.setCycle(1 - w.pumpT / w.pumpDur, 'cycle');
+  else hud.setCycle(0, '');
+  // A weapon you have not found yet has no slot. The rocket is last in the list, so dropping it
+  // leaves every other slot on the number it has always been on.
+  const slotState = player.weapons.map((wp, i) => ({ name: wp.name, active: i === player.weaponIndex, ammo: wp.isGun ? wp.mag + '/' + wp.reserve : '∞', empty: wp.isGun && wp.mag === 0 && wp.reserve === 0, locked: wp.locked })).filter((s) => !s.locked);
+  hud.setSlots(slotState); if (touch) touch.setSlots(slotState);
   hud.setGrenades(player.grenades); hud.setGrappleStamina(player.grapStam); hud.setHealth(player.hp, player.maxHp); hud.setSpread(w.spreadPx); hud.update(dt);
   if (online()) hud.setFocusMeter(playing, player.grapStam, false, 'GRAPPLE');
   else hud.setFocusMeter(playing && (w.kind === 'katana' || game.katanaStreak > 0 || game.focus.active), game.focus.active ? 1 : clamp(game.katanaStreak / KATANA_CHARGE_KILLS, 0, 1), game.focus.active, 'KATANA');

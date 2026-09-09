@@ -17,6 +17,12 @@ export const TYPES = {
   heavy: { hp: 320, speed: 3.0, weapon: 'shotgun', range: 18, stop: 9, keep: 5, pellets: 7, cool: [2.4, 3.2], dmg: 5, spread: 0.13, pspeed: 32, score: 260, scale: 1.25, name: 'HEAVY', hat: 'helmet', build: { bodyW: 1.55, headS: 0.88, limbR: 0.05 } },
   sniper: { hp: 60, speed: 3.6, weapon: 'sniper', range: 90, stop: 90, keep: 15, aimTime: 1.7, cool: [2.8, 3.8], dmg: 22, spread: 0.006, pspeed: 95, score: 180, scale: 1.05, name: 'SNIPER', stationary: true, hat: 'hood', build: { bodyW: 0.78, headS: 0.92, limbR: 0.026 } },
   shield: { hp: 150, speed: 3.8, weapon: 'pistol', range: 20, stop: 8, keep: 4, burst: 2, burstInt: 0.2, cool: [1.8, 2.6], dmg: 5, spread: 0.06, pspeed: 34, score: 200, scale: 1.05, name: 'SHIELDBEARER', hat: 'helmet', shield: true, build: { bodyW: 1.2, headS: 0.9, limbR: 0.042 } },
+  // ---- armoured: slow, area attacks, and bullets barely mark them. The plate soaks rifle fire
+  // down to 8%; the answer is a grenade, a rocket, or the orange power pack bolted to their back
+  // (see EnemyManager.damage). They drop the launcher, so the first one you crack arms you for the
+  // rest - grenades are what gets you through that first one.
+  warden: { hp: 900, speed: 2.2, weapon: 'slam', reach: 3.2, wind: 0.7, blast: 4.6, dmg: 42, cool: [2.2, 3.0], score: 900, scale: 1.6, name: 'WARDEN', hat: 'helmet', armored: true, build: { bodyW: 1.8, headS: 0.9, limbR: 0.06 } },
+  siege: { hp: 760, speed: 1.9, weapon: 'mortar', range: 34, stop: 22, keep: 14, blast: 4.2, dmg: 34, pspeed: 24, cool: [3.2, 4.2], aimTime: 1.1, score: 820, scale: 1.5, name: 'SIEGE', hat: 'helmet', armored: true, build: { bodyW: 1.7, headS: 0.88, limbR: 0.056 } },
   bomber: { hp: 26, speed: 6.5, weapon: 'bomb', fuseRange: 3.4, fuse: 1.05, blast: 4.2, dmg: 24, score: 150, scale: 0.9, name: 'INK BOMB', ink: INK.BLACK, model: 'bomber' },
   flyer: { hp: 40, speed: 6.2, weapon: 'dive', dmg: 10, cool: [2.8, 4.2], score: 140, scale: 1.5, name: 'PAPER WASP', flying: true, model: 'flyer' },
   boss: { hp: 2600, speed: 3.2, weapon: 'boss', bossKind: 'doodler', range: 32, stop: 6, keep: 0, cool: [2.6, 3.6], dmg: 22, score: 2500, scale: 2.7, name: 'THE DOODLER', boss: true, ink: INK.BLACK, hat: 'crown', build: { bodyW: 1.35, headS: 1.15, limbR: 0.06 } },
@@ -109,9 +115,21 @@ export function buildHumanoid(mat, solid, T) {
     bx(0.62, 0.06, 0.09, 0, 0.26, 0.04, solid, shieldG); bx(0.06, 0.62, 0.09, 0, 0.26, 0.04, solid, shieldG);
     parts.shield = new THREE.Object3D(); shieldG.add(parts.shield);
   }
+  // Slabs of plate over the chest and a filled orange power pack on the BACK. The weak point is
+  // placed rather than flagged: a hit sphere behind the torso is only the nearest thing the ray
+  // meets if you are actually behind them, so "get around the back" is geometry, not a rule.
+  if (T.armored) {
+    bx(0.78 * bodyW, 0.62, 0.26, 0, 0.3, 0.14, mat, torso); bx(0.5 * bodyW, 0.07, 0.28, 0, 0.5, 0.15, solid, torso);
+    bx(0.3 * bodyW, 0.2, 0.1, 0, 0.86, 0.2, solid, torso);   // visor across the face
+    const packG = new THREE.Group(); packG.position.set(0, 0.3, -0.3); torso.add(packG);
+    bx(0.42 * bodyW, 0.46, 0.22, 0, 0, 0, makeInkMaterial({ ink: INK.ORANGE, fill: true }), packG);
+    bx(0.5 * bodyW, 0.06, 0.26, 0, 0.24, 0, solid, packG); bx(0.5 * bodyW, 0.06, 0.26, 0, -0.24, 0, solid, packG);
+    parts.core = new THREE.Object3D(); packG.add(parts.core);
+  }
   Object.assign(J, { hips, torso, headG, armL, armR, foreL, foreR, legL, legR, shinL, shinR, gun, shieldG });
   const hit = [['head', 0.3], ['torso', 0.33], ['hips', 0.2], ['armL', 0.11], ['armR', 0.11], ['foreL', 0.1], ['foreR', 0.1], ['legL', 0.13], ['legR', 0.13], ['shinL', 0.11], ['shinR', 0.11]];
   if (T.shield) hit.unshift(['shield', 0.66]);
+  if (T.armored) hit.unshift(['core', 0.26]);
   root.scale.setScalar(T.scale);
   return { root, parts, J, tip, face: fc, hit };
 }
@@ -185,7 +203,15 @@ class Projectiles {
     const speed = p.vel.length() * 1.6; if (target) _d.subVectors(target.center, p.pos).normalize(); else _d.copy(player.forward);
     p.vel.copy(_d).multiplyScalar(speed); mgr.ctx.effects.sparks(p.pos, _d, INK.ORANGE, 10, 9); mgr.ctx.effects.strokeBurst(p.pos, INK.BLUE, 8, 4, { life: 0.2 });
   }
-  _burst(p, point) { const ctx = this.mgr.ctx; ctx.effects.explosion(point, 2.5, INK.BLACK); audio.explosion(point); const P = ctx.player; const d = P.center.distanceTo(point); if (d < 3.5 && P.alive) { P.takeDamage(p.dmg * (1 - d / 3.5), point); P.knockback(_v.subVectors(P.center, point).normalize(), 6); } if (!this.mgr.mirror) this.mgr.blastEnemies(point, 3.5, p.dmg * 1.5, p.owner); }
+  // `p.blast` is the blast radius, and doubles as the "is this a shell?" flag everywhere else --
+  // a radius is always truthy, so the two readings never disagree.
+  _burst(p, point) {
+    const ctx = this.mgr.ctx, R = p.blast;
+    ctx.effects.explosion(point, R * 0.72, p.ink); audio.explosion(point);
+    const P = ctx.player; const d = P.center.distanceTo(point);
+    if (d < R && P.alive) { P.takeDamage(p.dmg * (1 - d / R), point); P.knockback(_v.subVectors(P.center, point).normalize(), 6); }
+    if (!this.mgr.mirror) this.mgr.blastEnemies(point, R, p.dmg * 1.5, p.owner);
+  }
   update(dt) {
     const mgr = this.mgr, ctx = mgr.ctx, world = ctx.world; const list = this.list; let n = 0;
     for (let i = 0; i < list.length; i++) {
@@ -246,7 +272,7 @@ export class EnemyManager {
     e.target = best; return best;
   }
   nearestTarget(pos) { let best = null, bd = Infinity; for (const t of this.targets()) { if (!t.alive) continue; const d = t.body.pos.distanceToSquared(pos); if (d < bd) { bd = d; best = t; } } return best; }
-  clear() { for (const e of this.enemies) { this._removeLaser(e); if (!e.rootDetached) this.ctx.scene.remove(e.root); } this.enemies.length = 0; this.alive = 0; this.byId.clear(); this.projectiles.clear(); }
+  clear() { for (const e of this.enemies) { this._removeLaser(e); if (!e.rootDetached) this.ctx.scene.remove(e.root); } this.enemies.length = 0; this.alive = 0; this.byId.clear(); this.projectiles.clear(); this.armorTold = false; }
   spawn(type, pos, id = null) {
     const T = TYPES[type]; const ink = T.ink ?? INK.RED;
     const mat = makeInkMaterial({ ink, shadeScale: 0, shadeBias: 1 });
@@ -313,6 +339,20 @@ export class EnemyManager {
       this.ctx.effects.sparks(info.point, info.dir ? info.dir.clone().negate() : _up, INK.ORANGE, 8, 8); audio.shieldHit(info.point);
       if (info.source === 'katana' || info.source === 'blast') { e.shieldHp--; if (e.shieldHp <= 0) this._breakShield(e); }
       this.ctx.hud.hitmarker(false, false); return;
+    }
+    // Armour: inefficient rather than immune. A rifle magazine into the chest plate does something,
+    // it just does almost nothing, which reads as "wrong tool" instead of "invulnerable". Blast goes
+    // straight through, and so does the visor or the power pack on their back.
+    if (e.T.armored) {
+      const weak = info.part === 'core' || info.part === 'head';
+      // the pack is the real prize: a rifle grinds, but a big round into the back is two shots
+      if (info.source === 'blast' || weak) { if (info.part === 'core') amount *= 3.5; }
+      else if (info.source === 'katana' || info.source === 'focus') amount *= 0.35;
+      else {
+        amount *= 0.08;
+        this.ctx.effects.sparks(info.point || e.center, info.dir ? info.dir.clone().negate() : _up, INK.ORANGE, 6, 7); audio.shieldHit(info.point || e.center);
+        if (!this.armorTold) { this.armorTold = true; this.ctx.hud.tip('armoured · explosives, the visor, or the pack on its back', 3.2); }
+      }
     }
     amount *= this.mods.damage;
     e.hp -= amount; e.flinch = 1; e.flashT = 0.07; if (!e.flashOn) { setFill(e.mat, true); e.flashOn = true; }
@@ -632,6 +672,55 @@ export class EnemyManager {
       return;
     }
     if (T.weapon === 'boss') { this._thinkBoss(e, dt, pp, pc, dist, dy, yawTo, P); return; }
+    // ---- WARDEN: walks you down and slams the ground. The wind-up is long and drawn on the floor
+    // on purpose - an area attack you cannot see coming is just unexplained damage.
+    if (T.weapon === 'slam') {
+      e.aimAmt = damp(e.aimAmt, 0, 8, dt);
+      if (e.attackT > 0) {
+        e.attackT -= dt; e.yawT = yawTo; b.vel.x = damp(b.vel.x, 0, 10, dt); b.vel.z = damp(b.vel.z, 0, 10, dt);
+        // the tell: a ring on the floor that inks itself in as the fist comes up
+        const f = 1 - e.attackT / T.wind;
+        for (let i = 0; i < 3; i++) { const a0 = rand(0, TAU); _v.set(b.pos.x + Math.cos(a0) * T.blast * f, b.pos.y + 0.1, b.pos.z + Math.sin(a0) * T.blast * f); _v2.set(0, rand(0.5, 2), 0); ctx.effects._spawn('stroke', _v, _v2, { size: 0.05, life: 0.22, ink: INK.ORANGE, gravity: 2, stretch: 0.05, drag: 3 }); }
+        if (e.attackT <= 0) {
+          audio.stomp(e.center); ctx.effects.shakeAmt += 0.7; ctx.effects.explosion(b.pos.clone().add(_v.set(0, 0.2, 0)), T.blast, INK.ORANGE);
+          for (let i = 0; i < 20; i++) { const an = i / 20 * TAU; _v.set(b.pos.x + Math.cos(an) * 2, b.pos.y + 0.25, b.pos.z + Math.sin(an) * 2); _v2.set(Math.cos(an) * 12, 2, Math.sin(an) * 12); ctx.effects._spawn('stroke', _v, _v2, { size: 0.055, life: 0.38, ink: INK.ORANGE, gravity: 4, stretch: 0.06, drag: 3 }); }
+          for (const t of this.targets()) {
+            const dd = Math.hypot(t.body.pos.x - b.pos.x, t.body.pos.z - b.pos.z);
+            // the shockwave runs along the floor: jumping over it is a real out
+            if (t.alive && dd < T.blast && t.body.pos.y < b.pos.y + 2.2) { t.takeDamage(T.dmg * this.mods.damage * Math.sqrt(1 - dd / T.blast), e.center); t.knockback(_d.subVectors(t.center, e.center).normalize(), 8); }
+          }
+          if (ctx.blastBreakables) ctx.blastBreakables(b.pos, T.blast);
+          e.cool = rand(T.cool[0], T.cool[1]);
+        }
+        return;
+      }
+      if (dist < T.reach && Math.abs(dy) < 2.2 && e.cool <= 0 && e.los) { e.attackT = T.wind; audio.lunge(e.center); return; }
+      this._follow(e, dt, pp, T.speed);
+      return;
+    }
+    // ---- SIEGE: stands off and lobs. Slow shell on a visible arc, so the counter is to move.
+    if (T.weapon === 'mortar') {
+      if (e.los && dist < T.range) {
+        e.aimAmt = damp(e.aimAmt, 1, 6, dt); e.yawT = yawTo;
+        if (dist < T.keep) { const a = 20 * dt, nx = dx / dist, nz = dz / dist; b.vel.x += clamp(-nx * T.speed - b.vel.x, -a, a); b.vel.z += clamp(-nz * T.speed - b.vel.z, -a, a); }
+        else if (dist > T.stop) this._follow(e, dt, pp, T.speed);
+        else { b.vel.x = damp(b.vel.x, 0, 6, dt); b.vel.z = damp(b.vel.z, 0, 6, dt); }
+        if (e.cool <= 0) {
+          e.aimT += dt;
+          if (e.aimT >= T.aimTime) {
+            e.aimT = 0; e.cool = rand(T.cool[0], T.cool[1]);
+            _v.setFromMatrixPosition(e.tip.matrixWorld);
+            // lob: aim at the player and add the lift that a ballistic shell needs to get there
+            // the exact loft for a shell that falls at 9 m/s^2: vy/vh = g*R / (2*v^2). Guessing at
+            // this coefficient puts the shell either short or a storey over your head at every range.
+            _d.subVectors(pc, _v); const l = _d.length(); _d.divideScalar(Math.max(l, 0.01)); _d.y += l * 9 / (2 * T.pspeed * T.pspeed); _d.normalize();
+            this.projectiles.fire(_v, _d, T.pspeed, T.dmg, e, INK.ORANGE, 0.09, T.blast);
+            audio.rocketFire(e.center);
+          }
+        } else e.aimT = 0;
+      } else { e.aimAmt = damp(e.aimAmt, 0, 5, dt); e.aimT = 0; this._follow(e, dt, pp, T.speed); if (e.los) e.yawT = yawTo; }
+      return;
+    }
     const inRange = e.los && dist < T.range;
     if (inRange) {
       e.aimAmt = damp(e.aimAmt, 1, 8, dt); e.yawT = yawTo;
@@ -670,7 +759,7 @@ export class EnemyManager {
         }
         if (a.t > 1.3) { e.bossAtk = null; e.cool = rand(T.cool[0], T.cool[1]); }
       } else {
-        if (a.t > 0.6 && !a.done) { a.done = true; _v.setFromMatrixPosition(e.parts.head.matrixWorld); _v.y += 1; _d.subVectors(pc, _v); const l = _d.length(); _d.divideScalar(l); _d.y += l * 0.012; _d.normalize(); this.projectiles.fire(_v, _d, 24, T.dmg * 0.9, e, INK.BLACK, 0.4, 1); audio.enemyShot(e.center); }
+        if (a.t > 0.6 && !a.done) { a.done = true; _v.setFromMatrixPosition(e.parts.head.matrixWorld); _v.y += 1; _d.subVectors(pc, _v); const l = _d.length(); _d.divideScalar(l); _d.y += l * 0.012; _d.normalize(); this.projectiles.fire(_v, _d, 24, T.dmg * 0.9, e, INK.BLACK, 0.4, 3.5); audio.enemyShot(e.center); }
         if (a.t > 1.0) { e.bossAtk = null; e.cool = rand(T.cool[0] * 0.6, T.cool[1] * 0.6); }
       }
       return;
@@ -722,7 +811,7 @@ export class EnemyManager {
           _v.setFromMatrixPosition(e.parts.torso.matrixWorld); _v.y += 0.8;
           const base = Math.atan2(pp.x - b.pos.x, pp.z - b.pos.z); const an = base + (a.shots - 4) * 0.19;
           _d.set(Math.sin(an), 0.18 + rand(-0.05, 0.05), Math.cos(an)).normalize();
-          this.projectiles.fire(_v, _d, 20, T.dmg * 0.55 * this.mods.damage, e, INK.BLACK, 0.3, 1); a.shots++; if (a.shots === 1) audio.enemyShot(e.center);
+          this.projectiles.fire(_v, _d, 20, T.dmg * 0.55 * this.mods.damage, e, INK.BLACK, 0.3, 3.5); a.shots++; if (a.shots === 1) audio.enemyShot(e.center);
         }
         if (a.t > 1.8) { e.bossAtk = null; e.cool = rand(T.cool[0], T.cool[1]); e.sprays = (e.sprays || 0) + 1; }
       } else {

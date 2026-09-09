@@ -1,5 +1,7 @@
-// Level construction. Two maps share one builder: everything is merged ink geometry plus
-// axis-aligned box colliders, which is what the navigation grid is generated from.
+// Level construction. Every map shares one builder: everything is merged ink geometry plus
+// axis-aligned box colliders, which is what the navigation grid is generated from. See `LEVELS`
+// below for what is actually offered - a map can be marked `pvpOnly`, and one is gated off
+// entirely behind MEXICO_READY while it is unfinished.
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { makeInkMaterial, INK } from './render.js';
@@ -8,7 +10,7 @@ import { buildHumanoid } from './enemies.js';
 
 // Doodle Mexico is built and kept, but off the menu until it is ready; flip this to offer it again
 export const MEXICO_READY = false;
-export const LEVELS = [{ key: 'district', name: 'DOODLE DISTRICT', blurb: 'streets, rooftops and fire escapes' }, ...(MEXICO_READY ? [{ key: 'mexico', name: 'DOODLE MEXICO', blurb: 'a sun-baked plaza · piñatas, tacos and mariachi' }] : [])];
+export const LEVELS = [{ key: 'district', name: 'DOODLE DISTRICT', blurb: 'streets, rooftops and fire escapes' }, { key: 'undercity', name: 'THE UNDERCITY', blurb: 'flooded tunnels, shuttered shops and metro echoes', pvpOnly: true }, ...(MEXICO_READY ? [{ key: 'mexico', name: 'DOODLE MEXICO', blurb: 'a sun-baked plaza · piñatas, tacos and mariachi' }] : [])];
 
 function createBuilder(scene, world) {
   const geos = {}; const L = { rings: [], spawns: [], snipers: [], pickups: [], animated: [], meshes: [], playerStart: new THREE.Vector3(0, 0, 42), bounds: { minX: -55, maxX: 55, minZ: -55, maxZ: 55 }, arenaSpawns: [], grappleMovers: [], breakables: [], key: 'district' };
@@ -314,6 +316,111 @@ function buildDistrict(B, arena = false) {
   return B.finish();
 }
 
+// ============================ map 3: The Undercity ============================
+// A compact PVP maze: service tunnels below a shop-lined ground floor, with short roof
+// catwalks above. Every room has two exits and a small visual marker to keep orientation clear.
+function buildUndercity(B, arena = false) {
+  const { L, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, collider, addGeo } = B;
+  const BL = INK.BLUE, BK = INK.BLACK, OR = INK.ORANGE, RD = INK.RED;
+  const P = 45; L.key = 'undercity'; L.playerStart.set(0, 0.2, 34);
+  L.bounds = { minX: -P, maxX: P, minZ: -P, maxZ: P };
+
+  // Floors are deliberately broken into plates, leaving a central hatch and two side shafts. The
+  // shafts are not decoration: the north and south stairs climb out of the tunnels through them,
+  // and each one opens exactly where a climber's head would otherwise meet the underside of the
+  // ground floor, so the hole is the last two metres of the flight and nothing more.
+  slab(-44, -44, -4, 44, 0.15, 0.3); slab(4, -44, 44, 44, 0.15, 0.3);
+  slab(-4, -44, 4, -17.5, 0.15, 0.3); slab(-4, -14.1, 4, -4, 0.15, 0.3);
+  slab(-4, 4, 4, 14.1, 0.15, 0.3); slab(-4, 17.5, 4, 44, 0.15, 0.3);
+  slab(-44, -44, 44, 44, -11.5, 0.5, { ink: BL });
+  // The enclosing shell is tall enough to keep grapples and players inside all three layers.
+  wallX(-P, P, -P, -12, 28, 0.8, [[-7, 7, 0, 3.4]], { ink: BL });
+  wallX(-P, P, P, -12, 28, 0.8, [[-34, -28, 0, 3.4], [25, 31, 0, 3.4]], { ink: BL });
+  wallZ(-P, P, -P, -12, 28, 0.8, [[-7, 0, 0, 3.4], [20, 26, 0, 3.4]], { ink: BL });
+  wallZ(-P, P, P, -12, 28, 0.8, [[-25, -19, 0, 3.4], [15, 21, 0, 3.4]], { ink: BL });
+  collider(0, 17, 0, 100, 5, 100, { noNav: true, noGrapple: true });
+
+  const room = (x1, z1, x2, z2, h, gaps, landmark) => {
+    wallX(x1, x2, z1, 0.15, h, 0.35, gaps[0] || [], { ink: BL });
+    wallX(x1, x2, z2, 0.15, h, 0.35, gaps[1] || [], { ink: BL });
+    wallZ(z1, z2, x1, 0.15, h, 0.35, gaps[2] || [], { ink: BL });
+    wallZ(z1, z2, x2, 0.15, h, 0.35, gaps[3] || [], { ink: BL });
+    landmark(x1, z1, x2, z2);
+  };
+  // Four ground-floor interiors: paired doors plus windows keep cross-room fights moving.
+  room(-39, -39, -7, -8, 5.2, [[[ -25, -20, 0, 3.1 ]], [[-34, -29, 0, 3.1]], [[-25, -20, 0, 3.1]], [[-15, -10, 0, 3.1]]], (x1, z1, x2, z2) => {
+    box(x1 + 3, 0.15, z1 + 3, 1.2, 4, 1.2, { ink: RD }); box(x1 + 3, 4.2, z1 + 3, 1.8, 0.2, 1.8, { noCollide: true, ink: BK });
+  });
+  room(7, -39, 39, -8, 5.2, [[[15, 20, 0, 3.1]], [[28, 33, 0, 3.1]], [[10, 15, 0, 3.1]], [[25, 30, 0, 3.1]]], (x1, z1, x2, z2) => {
+    for (const x of [x1 + 4, x1 + 6]) { box(x, 0.15, z1 + 3, 0.22, 3.8, 0.22, { ink: OR }); box(x, 3.8, z1 + 3, 0.7, 0.18, 0.18, { noCollide: true, ink: BK }); }
+  });
+  room(-39, 8, -7, 39, 5.2, [[[ -28, -23, 0, 3.1 ]], [[-16, -11, 0, 3.1]], [[20, 26, 0, 3.1]], [[-2, 4, 0, 3.1]]], (x1, z1, x2, z2) => {
+    for (const z of [z1 + 4, z2 - 4]) cyl(x1 + 3, 0.15, z, 0.5, 3.5, { ink: RD });
+  });
+  room(7, 8, 39, 39, 5.2, [[[15, 20, 0, 3.1]], [[27, 32, 0, 3.1]], [[-4, 2, 0, 3.1]], [[20, 26, 0, 3.1]]], (x1, z1, x2, z2) => {
+    box(x2 - 3, 0.15, z2 - 3, 1.4, 3.6, 1.4, { ink: OR }); ring(x2 - 3, 4.2, z2 - 3, 'y');
+  });
+  // Interior sightline breaks: offset partitions create jogged routes and short shooting lanes.
+  wallZ(-8, 8, -3, 0.15, 5.2, 0.35, [[-1, 3], [5, 8]], { ink: BL });
+  wallZ(-8, 8, 3, 0.15, 5.2, 0.35, [[-8, -4], [0, 4]], { ink: BL });
+  wallX(-7, 7, -3, 0.15, 5.2, 0.35, [[-2, 2]], { ink: BL });
+  wallX(-7, 7, 3, 0.15, 5.2, 0.35, [[-5, -1], [2, 6]], { ink: BL });
+  // Skylight frames and catwalks above the four quarters.
+  slab(-39, -39, -7, -8, 9.1, 0.3); slab(7, -39, 39, -8, 9.1, 0.3);
+  slab(-39, 8, -7, 39, 9.1, 0.3); slab(7, 8, 39, 39, 9.1, 0.3);
+  for (const [x1, z1, x2, z2] of [[-39,-8,-7,-8],[7,-8,39,-8],[-39,8,-7,8],[7,8,39,8]]) rail(x1, z1, x2, z2, 9.1, { ink: BK });
+  rail(-3, -39, -3, -8, 9.1, { ink: BK }); rail(3, 8, 3, 39, 9.1, { ink: BK });
+  // Three stair cores and a central floor hatch form multiple vertical routes. Every riser is
+  // under the 0.55 m a body can be lifted by (physics.js, _moveHoriz): a taller one looks like a
+  // staircase and behaves like a wall, and the route it belongs to quietly stops existing.
+  stairs(-2, -11.5, -25, '+z', 26, 2.2, { rise: 0.45, run: 0.42 });
+  stairs(2, -11.5, 25, '-z', 26, 2.2, { rise: 0.45, run: 0.42 });
+  stairs(-25, 0.15, 2, '+x', 20, 2.2, { rise: 0.448, run: 0.42 });
+  stairs(25, 0.15, -2, '-x', 20, 2.2, { rise: 0.448, run: 0.42 });
+  // The middle flight stands clear of the hatch lip rather than on it: a stair whose bottom tread
+  // is over the void can only be entered from the side, and a side entry has to clear two treads
+  // at once (a body is wider than a tread is deep), which is 0.85 m and not a step anybody has.
+  stairs(-1.2, 0.15, 5.5, '+z', 20, 2.0, { rise: 0.448, run: 0.42 });
+  stairs(1, 0.15, -5.5, '-z', 20, 2.0, { rise: 0.448, run: 0.42 });
+  // and each of the two side flights arrives on a landing that reaches the roof lane beside it,
+  // laid level with the top step rather than ahead of it, which would clip the climber's head
+  slab(-16.6, -2, -13.6, 3.1, 9.1, 0.3, { ink: BL }); slab(13.6, -3.1, 16.6, 2, 9.1, 0.3, { ink: BL });
+  // Underground chambers and jogged service tunnels.
+  wallX(-39, 39, -29, -11.5, 7.2, 0.45, [[-34, -28], [-7, -1], [20, 26]], { ink: BL });
+  wallX(-39, 39, 0, -11.5, 7.2, 0.45, [[-28, -22], [-3, 3], [25, 31]], { ink: BL });
+  wallZ(-29, 0, -12, -11.5, 7.2, 0.45, [[-24, -18], [-5, 1]], { ink: BL });
+  wallZ(-29, 0, 12, -11.5, 7.2, 0.45, [[-14, -8], [7, 13]], { ink: BL });
+  wallZ(0, 29, -12, -11.5, 7.2, 0.45, [[3, 9], [20, 26]], { ink: BL });
+  wallZ(0, 29, 12, -11.5, 7.2, 0.45, [[-2, 4], [14, 20]], { ink: BL });
+  // Flooded duct (blue ribs), metro platform (orange edge), and red pipe room landmarks.
+  slab(-38, -27, 38, -23, -10.9, 0.12, { ink: BL });
+  for (let x = -30; x <= 34; x += 8) { box(x, -10.8, -25, 0.25, 5.4, 0.25, { ink: BK }); box(x, -5.6, -25, 1.2, 0.15, 0.15, { noCollide: true, ink: BL }); }
+  // Heavy service cabinets interrupt the only long bay, so the three tunnel spawns cannot see one
+  // another. They keep off the two stair runs - a duct post standing in the middle of a flight is
+  // the sort of thing nobody notices until they are being shot at on it.
+  for (const x of [-18, 18]) box(x, -11.5, -35, 2.4, 5.0, 2.6, { ink: BK });
+  box(0, -11.5, 10, 2.6, 5.0, 2.6, { ink: BK });
+  box(-30, -11.5, 17, 18, 0.25, 3.5, { ink: OR }); box(-21, -11.2, 17, 0.4, 2.2, 0.4, { ink: BK }); box(-6, -11.2, 17, 0.4, 2.2, 0.4, { ink: BK });
+  for (const x of [-30, -27, -24]) cyl(x, -11.3, 10, 0.38, 4.8, { ink: RD });
+  // Roof lanes are short and offset, with parapets and cover at each turn.
+  slab(-39, -5, -6, -2, 9.1, 0.3, { ink: BL }); slab(6, 2, 39, 5, 9.1, 0.3, { ink: BL });
+  slab(-5, 6, -2, 39, 9.1, 0.3, { ink: BL }); slab(2, -39, 5, -6, 9.1, 0.3, { ink: BL });
+  rail(-39, -5, -6, -5, 9.1, { ink: BK }); rail(6, 5, 39, 5, 9.1, { ink: BK }); rail(-5, 6, -5, 39, 9.1, { ink: BK }); rail(5, -39, 5, -6, 9.1, { ink: BK });
+  box(-22, 9.4, -3.5, 2.2, 1.0, 1.2, { ink: OR }); box(19, 9.4, 3.5, 2.2, 1.0, 1.2, { ink: RD });
+  for (const [x, z] of [[-6, -2], [6, 2], [-2, 6], [2, -6]]) box(x, 9.1, z, 0.8, 3.8, 0.8, { ink: BK });
+
+  // Co-op spawns, elevated perches, and contested floor pickups.
+  for (const p of [[-33,-11.5,-36], [0,-11.5,-36], [33,-11.5,-36], [-33,-11.5,8], [33,-11.5,8], [0,-11.5,27], [-29,0.2,-20], [28,0.2,-21], [-28,0.2,25], [28,0.2,27]]) spawn(...p);
+  for (const p of [[-22,10.45,-3.5], [19,10.45,3.5], [-3,9.45,20], [3,9.45,-20], [-20, -4.1, 17], [22, -4.1, -17]]) sniper(...p);
+  for (const p of [[-18,-11.45,-25], [18,-11.45,-25], [-18,-11.45,0], [18,-11.45,0], [-25,0.2,-4], [25,0.2,4], [-8,0.2,-15], [8,0.2,15], [-6,0.2,0], [-20,9.45,-3], [22,9.45,3], [-3,9.45,20], [3,9.45,-20], [0,-11.45,17]]) pickup(...p);
+  // roof spawns sit beside the crates, not in them - a body that starts inside geometry is shoved
+  // out of it on its first step, and where it lands is anyone's guess
+  const arenaPoints = [[-35,-11.4,-35], [0,-11.4,-35], [35,-11.4,-35], [-35,-11.4,10], [35,-11.4,10], [0,-11.4,28], [-30,0.25,-20], [28,0.25,-20], [-28,0.25,25], [30,0.25,27], [-25,9.4,-3.5], [16,9.4,3.5], [-4,9.5,20], [4,9.5,-20], [0,-11.4,0]];
+  for (const p of arenaPoints) L.arenaSpawns.push(new THREE.Vector3(...p));
+  L.teamSpawns = [arenaPoints.slice(0, 5), arenaPoints.slice(5, 10)].map(a => a.map(p => new THREE.Vector3(...p)));
+  return B.finish();
+}
+
 // ============================ map 2: The Desk ============================
 // You are two inches tall on somebody's desk. Everything is a stationery object at monstrous
 // scale: an open book whose pages are ramps, keyboard keys you hop between, a mug you spiral up,
@@ -466,5 +573,5 @@ function buildMexico(B, arena = false) {
 
 export function buildLevel(scene, world, key = 'district', opts = {}) {
   const B = createBuilder(scene, world);
-  return key === 'mexico' ? buildMexico(B, !!opts.arena) : buildDistrict(B, !!opts.arena);
+  return key === 'mexico' ? buildMexico(B, !!opts.arena) : key === 'undercity' ? buildUndercity(B, !!opts.arena) : buildDistrict(B, !!opts.arena);
 }
