@@ -1,0 +1,12 @@
+# Headless benches. They are written for one change, run against a real page, and deleted once the
+# change is verified - see AGENTS.md. Keeping one around would leave a probe served at a public URL.
+_*probe.html
+_tiny.html
+
+# There is no build and no package manager. If one of these appears, something has gone wrong.
+node_modules/
+package-lock.json
+
+*.log
+.DS_Store
+.env
