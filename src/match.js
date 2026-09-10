@@ -68,7 +68,7 @@ export class TeamMatch {
     for (const a of s.actors) this.spawn(a);
     const attackers = s.actors.filter((a) => a.team === s.attackTeam);
     const carrier = attackers[(s.round - 1) % Math.max(1, attackers.length)];
-    s.bomb = s.mode === 'demolition' && carrier ? { status: 'carried', carrier: carrier.id, pos: [...carrier.spawn], site: null, explodeAt: 0 } : null;
+    s.bomb = s.mode === 'demolition' && carrier ? { status: 'carried', carrier: carrier.id, pos: [...carrier.spawn], safePos: [...carrier.spawn], site: null, explodeAt: 0 } : null;
     this.publish(true);
   }
   publish(force = false) {
@@ -175,21 +175,21 @@ export class TeamMatch {
   dropBomb(id) {
     const b = this.state?.bomb; if (!b || b.status !== 'carried' || b.carrier !== id) return;
     const a = this.actor(id), raw = this.body(id)?.body.pos || vec(a?.spawn || [0, 0, 0]);
-    const p = this.bombDropPoint(raw, a);
+    const p = this.bombDropPoint(raw, a, b.safePos);
     b.status = 'dropped'; b.carrier = null; b.pos = p.toArray(); b.pickupAfter = this.now() + 900; this.state.interaction = null; this.publish(true);
   }
-  bombDropPoint(raw, actor) {
+  bombDropPoint(raw, actor, safePos = null) {
     const { world, nav, level } = this.ctx, base = level.teamSpawns[0][0];
     // Drop onto a reachable walking surface; an airborne death must not strand C4 in the sky
-    // or on an isolated prop. The assigned spawn remains a valid fallback outside the map.
-    for (const source of [raw, actor?.spawn && vec(actor.spawn), base].filter(Boolean)) {
+    // or on an isolated prop. A fall returns it to the last shore before using the base.
+    for (const source of [raw, safePos && vec(safePos), actor?.spawn && vec(actor.spawn), base].filter(Boolean)) {
       const hit = world.raycast(source.clone().add(new THREE.Vector3(0, .4, 0)), new THREE.Vector3(0, -1, 0), 200);
       if (!hit || hit.normal.y < .5) continue;
       const node = nav.nodes[nav.nearestNode(hit.point, 3, 2, true)];
       if (!node || node.iso || Math.abs(node.y - hit.point.y) > 1 || Math.hypot(node.x - hit.point.x, node.z - hit.point.z) > 3) continue;
       const reachable = new THREE.Vector3(node.x, node.y, node.z);
-      if (!nav.findPath(base, reachable)) continue;
-      if (world.hasLineOfSight(hit.point.clone().add(new THREE.Vector3(0, .3, 0)), reachable.clone().add(new THREE.Vector3(0, .3, 0)))) return hit.point;
+      if (!nav.findPath(base, reachable)?.complete) continue;
+      if (nav.walkClear(hit.point, reachable) && world.hasLineOfSight(hit.point.clone().add(new THREE.Vector3(0, .3, 0)), reachable.clone().add(new THREE.Vector3(0, .3, 0)))) return hit.point;
       return reachable;
     }
     return base.clone();
@@ -228,10 +228,13 @@ export class TeamMatch {
       return;
     }
     const bomb = s.bomb;
-    if (bomb?.status === 'carried') { const owner = this.body(bomb.carrier); if (owner) bomb.pos = owner.body.pos.toArray(); }
+    if (bomb?.status === 'carried') {
+      const owner = this.body(bomb.carrier);
+      if (owner) { bomb.pos = owner.body.pos.toArray(); if (owner.body.onGround) bomb.safePos = [...bomb.pos]; }
+    }
     if (bomb?.status === 'dropped' && now >= (bomb.pickupAfter || 0)) {
       const a = s.actors.find((a) => a.alive && a.team === s.attackTeam && this.body(a.id)?.body.pos.distanceTo(vec(bomb.pos)) < 2 && this.ctx.world.hasLineOfSight(this.body(a.id).eye, vec(bomb.pos).add(new THREE.Vector3(0, .3, 0))));
-      if (a) { bomb.status = 'carried'; bomb.carrier = a.id; }
+      if (a) { bomb.status = 'carried'; bomb.carrier = a.id; bomb.safePos = [...bomb.pos]; }
     }
     const valid = (a, pending = null) => {
       const intent = this.intents.get(a.id), action = this.actionFor(a.id);

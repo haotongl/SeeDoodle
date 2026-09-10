@@ -20,7 +20,7 @@ export function isTouchDevice() {
 // which is the thing the left one existed to allow, so it was one more ring in a picture that had
 // too many - and it sat exactly where the movement stick wants to be.
 const BTNS = [
-  ['score', 'TAB', 'b-score'], ['pause', '❚❚', 'b-pause'],
+  ['score', 'MAP', 'b-score'], ['pause', '❚❚', 'b-pause'],
   ['slot1', '1', 'b-s1'], ['slot2', '2', 'b-s2'], ['slot3', '3', 'b-s3'], ['slot4', '4', 'b-s4'], ['slot5', '5', 'b-s5'],
   ['grenade', 'NADE', 'b-nade'], ['grapple', 'HOOK', 'b-hook'], ['melee', 'SLASH', 'b-melee'], ['crouch', 'SLIDE', 'b-slide'],
   ['reload', 'RELOAD', 'b-reload'], ['jump', 'JUMP', 'b-jump'], ['aim', 'AIM', 'b-aim'],
@@ -76,7 +76,7 @@ export class TouchControls {
   }
 
   _btnAt(e) { return e.target && e.target.closest ? e.target.closest('.tb') : null; }
-  _onMenu(e) { return e.target && e.target.closest ? !!e.target.closest('#screen') : false; }
+  _onMenu(e) { return e.target && e.target.closest ? !!e.target.closest('#screen, .board') : false; }
 
   _down(e) {
     if (!this.active || this._onMenu(e)) return;
@@ -256,12 +256,13 @@ export const TOUCH_CONTROLS_HTML = `
     <div><b>SLASH</b> quick katana · <b>NADE</b> hold to throw further</div>
     <div><b>AIM + FIRE</b> dash-slash once the katana gauge is lit</div>
     <div><b>1-4</b> along the bottom pick a weapon</div>
+    <div><b>MAP</b> tap to open map and scores; tap again or fire to close</div>
   </div>
 </div>`;
 
 export const TOUCH_KEYS = {
   fire: 'FIRE', aim: 'AIM', block: 'AIM', jump: 'JUMP', sprint: 'push the stick forward', slide: 'SLIDE', dash: 'SLIDE',
   grapple: 'HOOK', melee: 'SLASH', reload: 'RELOAD', grenade: 'NADE', focus: 'AIM + FIRE', next: 'the weapon numbers',
-  pause: '❚❚', confirm: 'tap the screen', score: 'TAB',
+  pause: '❚❚', confirm: 'tap the screen', score: 'MAP',
   nadePin: 'PULL PIN', nadeCancel: 'CANCEL', interact: 'INTERACT', bombDrop: 'DROP C4',
 };

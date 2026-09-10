@@ -39,6 +39,7 @@ let myAppearance = appearanceOf();
 try { myAppearance = appearanceOf(JSON.parse(localStorage.getItem('doodle_appearance'))); } catch (e) { /* an old or incomplete preference uses the defaults */ }
 let appearanceOpen = false, appearancePreview = null;
 let level = buildLevel(R.scene, world, mapKey, { arena: false });
+R.setLevelGeometry?.(level);
 let nav = new NavGrid(world, level.bounds, level.navCell || 1).build();
 let loadedKey = mapKey, arenaLoaded = false;
 audio.setTune(mapKey === 'mexico' ? 'mexico' : 'district');
@@ -50,12 +51,14 @@ function setLevel(key, on, force = false) {
   level = buildLevel(R.scene, world, key, { arena: on }); nav = new NavGrid(world, level.bounds, level.navCell || 1).build();
   ctx.level = level; ctx.nav = nav; if (window.__game) { window.__game.level = level; window.__game.nav = nav; }
   R.setMap?.(key);
+  R.setLevelGeometry?.(level);
   for (const m of level.meshes) if (m.userData.skin) m.visible = m.userData.skin === ctx.skin();
   audio.setTune(key === 'mexico' ? 'mexico' : 'district');
 }
 const setArena = (on) => setLevel(net.active ? matchMap(lobby.map || mapKey, lobby.gameMode) : playable(mapKey, on), on);
 const input = new Input(canvas);
 const hud = new HUD(document.getElementById('hud'));
+input.onWheel = (event) => hud.scrollBoard(event);
 // A phone goes straight into touch controls - the decision is made once, here, on the way in.
 const hudEl = document.getElementById('hud');
 const touchMode = isTouchDevice();
@@ -644,6 +647,27 @@ function boardHTML(title = null) {
   }
   return `<h3>${ts(title || 'FREE FOR ALL')}</h3>${rows.map(([id, s]) => line(id, s, t`${s.kills} kills · ${s.deaths} deaths`)).join('')}<div class="foot">${t`first to ${FFA_TARGET} · ${mmss(matchLeft)} left · lobby ${code}`}</div>`;
 }
+const _navDirection = new THREE.Vector3();
+function updateNavigation(playing) {
+  if (!playing || game.menu) { hud.setNavigation(null); return; }
+  const observed = match.spectatedId ? remote.get(match.spectatedId) : player;
+  const pos = observed?.body.pos || player.body.pos;
+  R.camera.getWorldDirection(_navDirection);
+  const heading = (Math.atan2(_navDirection.x, -_navDirection.z) * 180 / Math.PI + 360) % 360;
+  const teammates = [], open = !hud.el.board.hidden;
+  if (open && (teamMode() || coop())) for (const [id, r] of remote) {
+    if (!r.alive || r.idle || id === match.spectatedId || (teamMode() && match.team(id) !== match.team(net.id))) continue;
+    teammates.push({ pos: r.body.pos, color: playerColorCSS(lobby.players.get(id)?.color ?? 0) });
+  }
+  let bomb = null;
+  const objective = open && game.mode === 'demolition' && match.state?.bomb;
+  if (objective && (objective.status === 'planted' || match.team(net.id) === match.state.attackTeam)) {
+    const carried = objective.status === 'carried' ? match.body(objective.carrier)?.body.pos : null;
+    const p = carried || (objective.pos && { x: objective.pos[0], y: objective.pos[1], z: objective.pos[2] });
+    if (p) bomb = { pos: p, planted: objective.status === 'planted' };
+  }
+  hud.setNavigation({ level, world, pos, heading, alive: !!observed?.alive, name: mapName(level.key), skin: ctx.skin(), teammates, sites: game.mode === 'demolition' ? level.bombSites || [] : [], bomb });
+}
 function checkWin() {
   if (!net.isHost || game.mode !== 'ffa' || game.over) return;
   let winner = null;
@@ -947,7 +971,10 @@ net.on('fell', (d, from) => { if (!net.isHost) return; const sc = scores.get(fro
 net.on('feed', (d) => hud.kill(String(d.text || ''), 0));
 player.onFall = () => {
   if (!online() || !inMatch()) return;
-  if (teamMode()) { if (player.alive) player.die(); return; }
+  if (teamMode()) {
+    if (player.alive) { player.lastHitBy = null; player.lastHit = null; player.hp = 0; player.die(); }
+    return true;
+  }
   hud.kill('fell off the page · -1 kill', 0);
   if (net.isHost) { const sc = scores.get(net.id); if (sc) { sc.kills = Math.max(0, sc.kills - 1); sendScores(); net.send('feed', { text: sc.name + ' fell off the page · -1' }); } }
   else net.send('fell', {});
@@ -1402,11 +1429,12 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
   else if (isCoop) hud.message('SQUAD SURVIVAL', late ? 'you joined a run in progress' : teamSize() + ' of you against the page · they come harder in a crowd', 3);
   else hud.message('FREE FOR ALL', late ? 'you joined a match in progress' : 'first to ' + FFA_TARGET + ' · ' + Math.round(FFA_TIME / 60) + ' minutes · everyone is fair game', 3);
   const rule = weaponModeOf(ctx.weaponMode());
-  hud.tip(rule.key === 'normal' ? t`hold <b>${hud.key('score')}</b> for the scoreboard` : `${ts(rule.name)} · ${ts(rule.blurb)}`, 5);
+  const mapTip = touchMode || input.usingGamepad ? t`tap <b>${hud.key('score')}</b> for map and scores` : t`hold <b>${hud.key('score')}</b> for map and scores`;
+  hud.tip(rule.key === 'normal' ? mapTip : `${ts(rule.name)} · ${ts(rule.blurb)}`, 5);
   // Say out loud what the legs can do this match. A dash that silently does nothing reads as a bug.
   if (!isCoop) setTimeout(() => { if (game.state === 'play') hud.tip(ts('movement') + ': <b>' + ts(mobOf(ctx.mobility()).name) + '</b> · ' + ts(mobOf(ctx.mobility()).blurb), 4); }, 5200);
   // a match started by someone else's click cannot grab the mouse: ask for a click
-  setTimeout(() => { if (game.state === 'play' && !input.pointerLocked && !input.usingGamepad) { player.cancelGrenade(); player.cancelKnife(); game.menu = true; showClickToPlay(); } }, 250);
+  setTimeout(() => { if (game.state === 'play' && !touchMode && !input.pointerLocked && !input.usingGamepad) { player.cancelGrenade(); player.cancelKnife(); game.menu = true; showClickToPlay(); } }, 250);
 }
 function pause(at = performance.now()) { if ((game.state !== 'play' && !(game.state === 'dying' && online())) || game.menu) return; player.cancelGrenade(at); player.cancelKnife(); if (!online()) game.state = 'pause'; game.menu = true; showPause(); audio.reelLoop(false); }
 function resume() { if (online()) { player._resetGrenadeInput(); game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad && !touchMode) input.requestLock(); return; } begin(); }
@@ -1451,14 +1479,17 @@ function step(now) {
   else if ((st === 'play' || (st === 'dying' && online())) && input.pressed('pause')) { if (game.menu) resume(); else { pause(input.holdTiming?.('pause')?.start ?? performance.now()); input.exitLock(); } }
   else if ((st === 'play' || st === 'dying') && game.menu && (input.pressed('jump') || input.pressed('confirm'))) resume();
   if (input.pressed('music')) { musicWanted = !musicWanted; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); hud.tip(musicWanted ? 'music on' : 'music off', 1.5); const mc = hud.el.panel.querySelector('#setMus'); if (mc) mc.checked = musicWanted; }
-  if (online() && playing) {
-    if (input.usingGamepad && input.pressed('score')) boardToggle = !boardToggle;
-    const want = ((input.down('score') && !input.usingGamepad) || boardToggle) && !game.menu;
+  if (playing) {
+    const toggle = input.usingGamepad || touchMode;
+    if (!toggle) boardToggle = false;
+    if (toggle && input.pressed('score')) boardToggle = !boardToggle;
+    if (game.menu || (touchMode && ['fire', 'aim', 'grenade', 'interact'].some(a => input.pressed(a)))) boardToggle = false;
+    const want = ((input.down('score') && !toggle) || boardToggle) && !game.menu;
     // the board is not a snapshot while it is held open: the ping column is live, and a column
     // that froze on whatever it read the instant you pressed Tab would be worse than none
-    if (want !== !hud.el.board.hidden) { hud.setBoard(want ? boardHTML() : null); boardT = 0; }
-    else if (want) { boardT += dt; if (boardT > 0.5) { boardT = 0; hud.setBoard(boardHTML()); } }
-  } else boardToggle = false;
+    if (want !== !hud.el.board.hidden) { hud.setBoard(want && online() ? boardHTML() : null, want && !online()); boardT = 0; }
+    else if (want && online()) { boardT += dt; if (boardT > 0.5) { boardT = 0; hud.setBoard(boardHTML()); } }
+  } else { boardToggle = false; if (!hud.el.board.hidden) hud.setBoard(null); }
   if (st === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad && !touchMode) { lockTipT -= dt; if (lockTipT <= 0) { lockTipT = 2.5; hud.tip('click the page to grab the mouse', 2); } }
   let scale = 1;
   if (game.hitstopT > 0) { game.hitstopT -= dt; scale = game.hitstopScale; }
@@ -1509,16 +1540,17 @@ function step(now) {
   // leaves every other slot on the number it has always been on.
   const slotState = player.weapons.map((wp, i) => ({ slot: i + 1, key: wp.kind === 'grenade' ? hud.key('fire') : String(i + 1), name: wp.name, active: i === player.weaponIndex, ammo: wp.isGun ? wp.mag + '/' + wp.reserve : '∞', empty: wp.isGun && wp.mag === 0 && wp.reserve === 0, locked: wp.locked || !player.weaponAllowed(i) })).filter((s) => !s.locked);
   hud.setSlots(slotState); if (touch) touch.setSlots(slotState);
-  hud.setWeaponMode(online() ? weaponModeOf(ctx.weaponMode()).name : null);
+  hud.setWeaponMode(online() && ctx.weaponMode() !== 'normal' ? weaponModeOf(ctx.weaponMode()).name : null);
   hud.setGrenades(player.infiniteGrenades ? Infinity : player.grenadesAllowed ? player.grenades : 0);
   hud.setGrenadeState?.(player.weaponRules.key === 'grenades' ? player.grenadeStatus : null); if (touch) touch.setGrenadeState?.(player.grenadeStatus);
   hud.setKnifeState?.(player.knifeStatus);
   hud.setGrappleStamina(player.grapStam); hud.setHealth(player.hp, player.maxHp); hud.setSpread(w.spreadPx); hud.update(dt);
-  if (online()) hud.setFocusMeter(playing, player.grapStam, false, 'GRAPPLE');
+  if (online()) hud.setFocusMeter(false, 0, false);
   else hud.setFocusMeter(playing && (w.kind === 'katana' || game.katanaStreak > 0 || game.focus.active), game.focus.active ? 1 : clamp(game.katanaStreak / KATANA_CHARGE_KILLS, 0, 1), game.focus.active, 'KATANA');
   if (game.boss) { if (game.boss.alive) hud.setBoss(game.boss.T.name, game.boss.hp / game.boss.maxHp); else { hud.setBoss(null, null); game.boss = null; } }
   audio.setIntensity(clamp((enemies.alive + game.queue.length + remote.size * 2) / 12, 0, 1) * (game.intermission > 0 ? 0.25 : 1));
   R.render(game.time, { hurt: player.hurtFx, flash: player.flashFx, slow: scale < 1 ? 1 : 0, lowHp: player.alive && player.hp < 30 ? 1 - player.hp / 30 : 0 });
+  updateNavigation(playing);
   const showNames = online() && inMatch() && !game.menu && !hud.el.screen.classList.contains('show') && hud.el.board.hidden;
   for (const r of remote.values()) r.updateNameTag(showNames, now / 1000);
 }

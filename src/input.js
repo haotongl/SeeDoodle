@@ -53,9 +53,12 @@ export class Input {
       let dx = e.movementX, dy = e.movementY;
       // guard against pointer-lock spikes
       if (Math.abs(dx) > 400) dx = 0; if (Math.abs(dy) > 400) dy = 0;
+      if (this.usingGamepad && this.onDeviceChange) this.onDeviceChange(false);
       this.mx += dx; this.my += dy; this.usingGamepad = false; this.lastActive = performance.now();
     });
     document.addEventListener('mousedown', (e) => {
+      // Touch-scrolling the map can emit compatibility mouse events; those are UI, not fire.
+      if (e.target?.closest?.('.board')) return;
       const a = MOUSEMAP[e.button]; if (a) this.mouseBtns[a] = true;
       if (a && this.pointerLocked) this.pressQueue[a] = true;
       if (a) this.markHold(a, true, 'mouse:' + e.button);
@@ -65,7 +68,10 @@ export class Input {
     });
     document.addEventListener('mouseup', (e) => { const a = MOUSEMAP[e.button]; if (a) { this.mouseBtns[a] = false; this.markHold(a, false, 'mouse:' + e.button); } });
     document.addEventListener('contextmenu', (e) => e.preventDefault());
-    document.addEventListener('wheel', (e) => { this.wheel += Math.sign(e.deltaY); }, { passive: true });
+    document.addEventListener('wheel', (e) => {
+      if (this.onWheel?.(e)) { e.preventDefault(); return; }
+      this.wheel += Math.sign(e.deltaY);
+    }, { passive: false });
     document.addEventListener('pointerlockchange', () => {
       this.pointerLocked = document.pointerLockElement === this.canvas;
       if (!this.pointerLocked) cancelControls();

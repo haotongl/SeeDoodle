@@ -17,7 +17,7 @@ export class ArenaBots {
     this.ctx = ctx; this.match = match; this.sims = new Map(); this.sequence = 0;
     this.nonce = Date.now().toString(36) + Math.random().toString(36).slice(2, 9);
   }
-  clear() { this.sims.clear(); }
+  clear() { this.sims.clear(); this.defuser = null; }
   replayGrenades() {
     if (!this.match.net.isHost || this.match.state?.phase !== 'live') return 0;
     let sent = 0;
@@ -86,11 +86,24 @@ export class ArenaBots {
       if (bomb.status === 'planted') {
         const pos = point(bomb.pos); if (!pos) return null;
         if (!attack) {
-          // One defender works on the bomb while the others cover; losing that defender hands
-          // the job to the nearest survivor on the next frame rather than resetting the team.
-          const candidates = state.actors.filter((a) => a.team === actor.team && a.alive && a.bot);
-          candidates.sort((a, b) => (this._position(a)?.distanceToSquared(pos) ?? Infinity) - (this._position(b)?.distanceToSquared(pos) ?? Infinity));
-          if (candidates[0]?.id === actor.id) return { pos, interact: true, radius: 1.25, priority: true };
+          // Keep a defuse in progress, including a human's. Assign by walkable route once;
+          // a teammate moving closer must not make the active defuser abandon their hold.
+          const working = state.interaction?.kind === 'defuse' && this.match.actor(state.interaction.id);
+          const key = `${state.round}:${bomb.pos.join(',')}`;
+          const reassign = this.defuser?.key !== key || (this.defuser.id ? !this.match.actor(this.defuser.id)?.alive : now >= this.defuser.retryAt);
+          if (!working?.alive && reassign) {
+            let best = null, distance = Infinity;
+            for (const candidate of state.actors) {
+              if (candidate.team !== actor.team || !candidate.alive || !candidate.bot) continue;
+              const from = this._position(candidate), path = from && this.ctx.nav.findPath(from, pos);
+              if (!path?.complete) continue;
+              let length = from.distanceTo(path[0]) + path.at(-1).distanceTo(pos);
+              for (let i = 1; i < path.length; i++) length += path[i - 1].distanceTo(path[i]);
+              if (length < distance) { best = candidate.id; distance = length; }
+            }
+            this.defuser = { key, id: best, retryAt: now + 1000 };
+          }
+          if ((working?.alive ? working.id : this.defuser?.id) === actor.id) return { pos, interact: true, radius: 1.25, priority: true };
         }
         const a = sim.role * 2.39996, guard = pos.clone().add(new THREE.Vector3(Math.cos(a) * 6, 0, Math.sin(a) * 6));
         return { pos: guard, interact: false, radius: 1.6, priority: false };
@@ -276,6 +289,17 @@ export class ArenaBots {
     if (!force && now < sim.wireAt) return;
     this.match.net.send('botps', { id: actor.id, ps, round: this.match.state.round, life: actor.life }); sim.wireAt = now + 100;
   }
+  _fall(actor, sim, now) {
+    const p = sim.body.pos, level = this.ctx.level, bounds = level.bounds;
+    if (p.y >= (level.fallY ?? -12) && p.x >= bounds.minX - 8 && p.x <= bounds.maxX + 8 && p.z >= bounds.minZ - 8 && p.z <= bounds.maxZ + 8) return false;
+    const remote = this.match.body(actor.id); if (remote) remote.body.pos.copy(p);
+    if (this.match.death(actor.id, null, actor.life, this.match.state.round)) {
+      sim.body.vel.set(0, 0, 0); sim.chargeAt = null; sim.lastIntent = false;
+      this._publish(actor, sim, now, true); remote?.ragdoll(null, false);
+      this.match.net.send('botdead', { id: actor.id, killer: null, round: this.match.state.round, life: actor.life });
+    }
+    return true;
+  }
   update(dt) {
     const match = this.match, state = match.state;
     if (!match.net.isHost || !state || state.phase !== 'live') return;
@@ -287,6 +311,7 @@ export class ArenaBots {
       let sim = this.sims.get(actor.id);
       if (!sim || sim.life !== actor.life || sim.round !== state.round) sim = this._create(actor, now);
       if (!actor.alive) { sim.body.vel.set(0, 0, 0); sim.chargeAt = null; this._publish(actor, sim, now); continue; }
+      if (this._fall(actor, sim, now)) continue;
       sim.eye.copy(sim.body.pos); sim.eye.y += 1.45;
       if (now >= sim.thinkAt) this._think(actor, sim, now);
       const target = match.actor(sim.target), visible = target && this._visible(sim, target, now), objective = this._objective(actor, sim, now);
@@ -311,6 +336,7 @@ export class ArenaBots {
         if (this.ctx.nav.walkClear(sim.body.pos, escape)) { goal = escape; stop = 0.5; dodging = true; break; }
       }
       const stopped = this._walk(actor, sim, goal, stop, dt, now, visible);
+      if (this._fall(actor, sim, now)) continue;
       sim.eye.copy(sim.body.pos); sim.eye.y += 1.45;
       const look = visible ? this._position(target).clone().add(new THREE.Vector3(0, 1, 0)) : sim.path[sim.pathIndex] || goal;
       if (look) { const v = look.clone().sub(sim.eye); sim.yaw = angleLerp(sim.yaw, Math.atan2(-v.x, -v.z), Math.min(1, dt * 7)); sim.pitch += (Math.atan2(v.y, Math.hypot(v.x, v.z)) - sim.pitch) * Math.min(1, dt * 7); }

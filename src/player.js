@@ -313,7 +313,9 @@ export class Player {
     ctx.world.moveBody(b, dt);
     const bounds = ctx.level.bounds;
     if (b.pos.y < (ctx.level.fallY ?? -12) || b.pos.x < bounds.minX - 8 || b.pos.x > bounds.maxX + 8 || b.pos.z < bounds.minZ - 8 || b.pos.z > bounds.maxZ + 8) {
-      this.detachGrapple(false); b.pos.copy(ctx.level.playerStart); b.vel.set(0, 0, 0); this.takeDamage(20, null); if (this.onFall) this.onFall();
+      // Team deaths must resolve at the fall, before the survival-mode rescue relocates C4.
+      this.detachGrapple(false); if (this.onFall?.() === true) return;
+      b.pos.copy(ctx.level.playerStart); b.vel.set(0, 0, 0); this.takeDamage(20, null);
       ctx.hud.message('OFF THE PAGE', 'redrawn at the start', 1.8);
     }
     if (b.onGround && !this.lastGround) {

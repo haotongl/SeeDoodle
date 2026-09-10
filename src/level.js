@@ -670,9 +670,18 @@ function buildZijingang(B) {
   const { L, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, collider, addGeo, spawn, sniper, pickup } = B;
   L.key = 'zijingang'; L.bounds = { minX: -120, maxX: 120, minZ: -90, maxZ: 90 }; L.navCell = 1.5; L.fallY = -5;
   L.previewCam = { target: [0, 1, 0], radius: 158, height: 105, speed: 0.018 };
-  L.zones = [{ id: 'east1', name: 'EAST 1', x: 0, z: -46 }, { id: 'east2', name: 'EAST 2', x: 63, z: 38 }, { id: 'lake', name: 'QIZHEN LAKE', x: -104, z: 36 }, { id: 'corridor', name: 'CULTURE CORRIDOR', x: 26, z: 38 }];
+  L.zones = [
+    { id: 'hall', name: 'YONGMAN HALL', x: -71, z: -7, bounds: { minX: -83, maxX: -55, minZ: -19, maxZ: 5 } },
+    { id: 'east1', name: 'EAST 1', x: 0, z: -46, bounds: { minX: -79, maxX: 83, minZ: -77, maxZ: -17 } },
+    { id: 'east2', name: 'EAST 2', x: 63, z: 38, bounds: { minX: 32, maxX: 92, minZ: 12, maxZ: 64 } },
+    { id: 'corridor', name: 'CULTURE CORRIDOR', x: 26, z: 38, bounds: { minX: 20, maxX: 32, minZ: -17, maxZ: 84 } },
+    { id: 'lake', name: 'QIZHEN LAKE', x: -104, z: 36, bounds: { minX: -120, maxX: -43, minZ: -89, maxZ: 89 } },
+    { id: 'garden', name: 'LAKESIDE GARDEN', x: -15, z: 40, bounds: { minX: -43, maxX: 20, minZ: 10, maxZ: 85 } },
+    { id: 'road', name: 'EAST CAMPUS ROAD', x: 104, z: 0, bounds: { minX: 93, maxX: 119, minZ: -89, maxZ: 89 } },
+  ];
+  L.tactical = { buildings: [], water: [], paths: [], labels: L.zones.map(({ name, x, z }) => ({ name, x, z, small: name === 'YONGMAN HALL' || name === 'LAKESIDE GARDEN' })) };
   L.referenceNotes = 'OSM East 1 / East 2 / student cultural corridor footprints and the official ZJU campus map; compressed to 240 x 180. Routes, entrances, balconies, cover and objective positions are gameplay adaptations, not a campus survey.';
-  const stone = { surface: 'stone', ink: INK.BROWN }, pale = { surface: 'ceramic', ink: INK.BLACK }, dark = { surface: 'metal', ink: INK.BLACK };
+  const stone = { surface: 'stone', ink: INK.BROWN }, pale = { surface: 'ceramic', ink: INK.BLACK }, dark = { surface: 'metal', ink: INK.BLACK }, interior = { surface: 'plaster', ink: INK.BLACK };
   const glass = { surface: 'glass', ink: INK.TEAL, noCollide: true }, detail = { noCollide: true, noNav: true };
   const stairGuards = (x, z, dir, width, run = 0.85) => {
     const dx = dir === '-x' ? -1 : 0, dz = dir === '+z' ? 1 : 0;
@@ -684,20 +693,26 @@ function buildZijingang(B) {
     }
   };
 
-  // Separate land strips leave the lake genuinely unsupported. A stepped stone embankment
-  // and low rail show exactly where that physical shoreline is, including its short returns.
+  // The collision strips leave the lake unsupported. One visible land surface avoids
+  // exposing internal box sides along coplanar joins at shallow viewing angles.
   box(-60, -0.9, 0, 120, 0.08, 180, { surface: 'water', ink: INK.TEAL, noCollide: true });
   const shore = [-100, -100, -101, -102, -102, -97, -92, -78, -62, -52, -54, -58, -61, -71, -84];
+  const landOutline = [[120, -90], ...shore.flatMap((x, i) => [[x, -90 + i * 12], [x, -78 + i * 12]]), [120, 90]];
+  const landShape = new THREE.Shape();
+  landOutline.forEach(([x, z], i) => i ? landShape.lineTo(x, -z) : landShape.moveTo(x, -z)); landShape.closePath();
+  const landSurface = new THREE.ShapeGeometry(landShape); landSurface.rotateX(-Math.PI / 2); landSurface.translate(0, 0.003, 0); addGeo(landSurface, INK.GREEN, 'foliage');
+  L.tactical.water.push([[-120, -90], ...shore.flatMap((x, i) => [[x, -90 + i * 12], [x, -78 + i * 12]]), [-120, 90]]);
+  L.tactical.paths.push([[93, -90], [119, -90], [119, 90], [93, 90]], [[-79, -17], [97, -17], [97, 10], [-79, 10]], [[-37, 65], [97, 65], [97, 87], [-37, 87]]);
   for (let i = 0; i < shore.length; i++) {
     const x = shore[i], z1 = -90 + i * 12, z2 = z1 + 12;
-    box((x + 120) / 2, -1.4, (z1 + z2) / 2, 120 - x, 1.4, 12, { surface: 'ground', ink: INK.OLIVE });
+    collider((x + 120) / 2, -1.4, (z1 + z2) / 2, 120 - x, 1.4, 12);
     box(x + 9, 0.012, (z1 + z2) / 2, 18, 0.022, 12, { ...stone, ...detail });
     box(x + 0.13, -1.5, (z1 + z2) / 2, 0.3, 1.65, 12, { ...stone, noNav: true });
-    rail(x + 0.35, i === 9 ? z1 + 6 : z1, x + 0.35, z2, 0.15);
+    rail(x + 0.35, i === 9 ? z1 + 6 : i === 7 ? 2 : z1, x + 0.35, z2, 0.15);
     if (i && shore[i - 1] !== x) {
       const a = Math.min(x, shore[i - 1]), b = Math.max(x, shore[i - 1]);
       box((a + b) / 2, -1.5, z1, b - a, 1.65, 0.3, { ...stone, noNav: true });
-      if (i === 7) { rail(a + 0.35, z1, -91, z1, 0.15); rail(-85, z1, b + 0.35, z1, 0.15); }
+      if (i === 7) { rail(a + 0.35, z1, -91, z1, 0.15); rail(-85, z1, -82.8, z1, 0.15); }
       else rail(a + 0.35, z1, b + 0.35, z1, 0.15);
     }
   }
@@ -709,6 +724,16 @@ function buildZijingang(B) {
   for (const z of [-10, 68]) for (let x = 99; x < 112; x += 1.7) box(x, 0.077, z, 0.8, 0.022, 4, { ...pale, ...detail });
   for (const [x1, z1, x2, z2] of [[-42, 39, -15, 58], [-34, 65, -9, 82], [-38, 12, -14, 19], [-58, -52, -39, -40], [-25, -52, -12, -40], [46, -54, 62, -39], [48, 29, 62, 47], [72, 41, 79, 49], [113, -88, 118, 88]])
     box((x1 + x2) / 2, 0.065, (z1 + z2) / 2, x2 - x1, 0.024, z2 - z1, { surface: 'foliage', ink: INK.GREEN, ...detail });
+  // The stone shader supplies restrained paving joints; raised metal lines would look
+  // like a coarse grid and compete with the objective markings.
+  for (const [x1, z1, x2, z2] of [[-77, -60.3, 18, -33.7], [32.5, -60.3, 82, -33.7], [42.3, 24.4, 83.2, 51.6]]) {
+    box((x1 + x2) / 2, 0.025, (z1 + z2) / 2, x2 - x1, 0.025, z2 - z1, { ...stone, ...detail });
+  }
+  const gardenPath = [[-48, 5], [-35, 23], [-22, 43], [-8, 63], [13, 79]];
+  for (let i = 0; i < gardenPath.length - 1; i++) {
+    const [x1, z1] = gardenPath[i], [x2, z2] = gardenPath[i + 1], dx = x2 - x1, dz = z2 - z1;
+    const g = new THREE.BoxGeometry(6.2, 0.04, Math.hypot(dx, dz) + 0.3); g.rotateY(Math.atan2(dx, dz)); g.translate((x1 + x2) / 2, 0.115, (z1 + z2) / 2); addGeo(g, INK.BROWN, 'stone');
+  }
   // Campus hedges, railings and planting beds mark the cropped block without a sky lid.
   for (const [x, z, w, d] of [[10, -89.5, 218, 0.65], [18, 89.5, 201, 0.65], [119.5, 0, 0.65, 179]]) {
     box(x, 0, z, w, 0.75, d, { ...stone, noNav: true });
@@ -720,31 +745,87 @@ function buildZijingang(B) {
     for (let f = 0; f < rows; f++) {
       const y = 4.7 + f * (h - 4.9) / rows;
       for (const z of [z1 - 0.27, z2 + 0.27]) {
-        box((x1 + x2) / 2, y, z, x2 - x1 - 1.4, 1.9, 0.08, glass);
-        for (let x = x1 + 1.3; x < x2 - 0.6; x += 3.4) box(x, y - 0.08, z + (z === z1 - 0.27 ? -0.075 : 0.075), 0.1, 2.08, 0.13, { ...pale, ...detail });
+        box((x1 + x2) / 2, y, z, x2 - x1 - 1.4, 1.55, 0.08, glass);
+        for (let x = x1 + 1.3; x < x2 - 0.6; x += 3.4) box(x, y - 0.08, z + (z === z1 - 0.27 ? -0.075 : 0.075), 0.22, 1.73, 0.13, { ...pale, ...detail });
+        box((x1 + x2) / 2, y + 0.92, z + (z === z1 - 0.27 ? -0.07 : 0.07), x2 - x1 - 1.35, 0.07, 0.12, { ...dark, ...detail });
       }
       for (const x of [x1 - 0.27, x2 + 0.27]) {
-        box(x, y, (z1 + z2) / 2, 0.08, 1.9, z2 - z1 - 1.4, glass);
-        for (let z = z1 + 1.3; z < z2 - 0.6; z += 3.4) box(x + (x === x1 - 0.27 ? -0.075 : 0.075), y - 0.08, z, 0.13, 2.08, 0.1, { ...pale, ...detail });
+        box(x, y, (z1 + z2) / 2, 0.08, 1.55, z2 - z1 - 1.4, glass);
+        for (let z = z1 + 1.3; z < z2 - 0.6; z += 3.4) box(x + (x === x1 - 0.27 ? -0.075 : 0.075), y - 0.08, z, 0.13, 1.73, 0.22, { ...pale, ...detail });
       }
     }
     for (const z of [z1 - 0.3, z2 + 0.3]) box((x1 + x2) / 2, h - 0.32, z, x2 - x1 + 0.65, 0.18, 0.18, { ...pale, ...detail });
   };
   const wing = (x1, z1, x2, z2, h, doors = {}) => {
+    L.tactical.buildings.push({ x1, z1, x2, z2 });
     const openings = xs => (xs || []).map(x => [x - 2.3, x + 2.3, 0, 3.4]);
     wallX(x1, x2, z1, 0, 4, 0.48, openings(doors.n), pale);
     wallX(x1, x2, z2, 0, 4, 0.48, openings(doors.s), pale);
     wallZ(z1 + 0.24, z2 - 0.24, x1, 0, 4, 0.48, openings(doors.w), pale);
     wallZ(z1 + 0.24, z2 - 0.24, x2, 0, 4, 0.48, openings(doors.e), pale);
-    slab(x1 - 0.28, z1 - 0.28, x2 + 0.28, z2 + 0.28, 4, 0.28, { ...pale, noNav: true });
-    box((x1 + x2) / 2, 4.06, (z1 + z2) / 2, x2 - x1 + 0.48, h - 4.06, z2 - z1 + 0.48, { ...pale, noNav: true });
+    box((x1 + x2) / 2, 0.008, (z1 + z2) / 2, x2 - x1 - 0.46, 0.022, z2 - z1 - 0.46, { ...stone, ...detail });
+    wallZ(z1 + 0.24, z2 - 0.24, x1 + 0.265, 0, 3.72, 0.025, openings(doors.w), { ...interior, ...detail });
+    wallZ(z1 + 0.24, z2 - 0.24, x2 - 0.265, 0, 3.72, 0.025, openings(doors.e), { ...interior, ...detail });
+    slab(x1 - 0.28, z1 - 0.28, x2 + 0.28, z2 + 0.28, 4, 0.28, { ...interior, noNav: true });
+    box((x1 + x2) / 2, 3.98, (z1 + z2) / 2, x2 - x1 + 0.48, h - 3.98, z2 - z1 + 0.48, { ...pale, noNav: true });
     slab(x1 - 0.6, z1 - 0.6, x2 + 0.6, z2 + 0.6, h + 0.18, 0.2, { ...stone, noNav: true });
     facade(x1, z1, x2, z2, h);
+    for (const [z, side, doorXs] of [[z1, -1, doors.n || []], [z2, 1, doors.s || []]]) {
+      wallX(x1, x2, z - side * 0.265, 0, 3.72, 0.025, openings(doorXs), { ...interior, ...detail });
+      for (let x = x1 + 2.2; x < x2 - 1.8; x += 5.1) {
+        if (doorXs.some(d => Math.abs(d - x) < 4)) continue;
+        for (const face of [-1, 1]) {
+          const wz = z + face * 0.29;
+          box(x, 1.05, wz, 2.65, 1.9, 0.08, glass);
+          for (const dx of [-1.43, 0, 1.43]) box(x + dx, 0.95, wz + face * 0.075, 0.13, 2.12, 0.12, { ...pale, ...detail });
+          for (const y of [0.92, 3.02]) box(x, y, wz + face * 0.07, 3, 0.12, 0.25, { ...pale, ...detail });
+        }
+      }
+      wallX(x1, x2, z + side * 0.3, 0.12, 0.42, 0.1, openings(doorXs), { ...stone, ...detail });
+      for (const x of doorXs) {
+        box(x, 3.4, z + side * 1.05, 5.8, 0.2, 2.3, { ...dark, noNav: true });
+        for (const dx of [-2.8, 2.8]) box(x + dx, 0, z + side * 1.85, 0.2, 3.4, 0.2, { ...pale, noNav: true });
+      }
+      for (let x = x1 + 1; x < x2 - 1; x += 4) {
+        box(x, h + 0.24, z + side * 0.35, 0.07, 0.85, 0.07, { ...dark, ...detail });
+      }
+      box((x1 + x2) / 2, h + 1, z + side * 0.35, x2 - x1 - 1, 0.07, 0.07, { ...dark, ...detail });
+    }
+  };
+  const classroom = (x, wallZPos, inward) => {
+    const front = wallZPos + inward * 5.2;
+    for (const dx of [-7, 7]) box(x + dx, 0, wallZPos + inward * 2.7, 0.2, 3.65, 5, { ...interior, noNav: true });
+    wallX(x - 7, x + 7, front, 0, 3.65, 0.2, [[x - 2.1, x + 2.1, 0, 3.25]], { ...interior, noNav: true });
+    box(x - 6.83, 1.15, wallZPos + inward * 2.7, 0.1, 1.65, 3.5, { surface: 'cloth', ink: INK.GREEN, ...detail });
+    box(x - 6.72, 1.1, wallZPos + inward * 2.7, 0.28, 0.1, 3.65, { ...pale, ...detail });
+    for (const dx of [-3.7, 3.7]) {
+      const tz = wallZPos + inward * 2.8;
+      box(x + dx, 0.78, tz, 2.8, 0.12, 1.05, { surface: 'wood', ink: INK.BROWN, ...detail });
+      for (const sx of [-1.1, 1.1]) box(x + dx + sx, 0, tz, 0.09, 0.78, 0.65, { ...dark, ...detail });
+      for (const sx of [-0.7, 0.7]) {
+        box(x + dx + sx, 0.44, tz + inward * 0.78, 0.58, 0.09, 0.5, { surface: 'wood', ink: INK.BROWN, ...detail });
+        box(x + dx + sx, 0.53, tz + inward * 1.01, 0.58, 0.45, 0.08, { surface: 'wood', ink: INK.BROWN, ...detail });
+        for (const sz of [0.6, 0.96]) box(x + dx + sx, 0, tz + inward * sz, 0.08, 0.44, 0.08, { ...dark, ...detail });
+      }
+      collider(x + dx, 0, tz + inward * 0.25, 2.8, 0.98, 1.6, { noNav: true });
+      box(x + dx - 0.55, 0.91, tz, 0.62, 0.05, 0.4, { surface: 'cloth', ink: INK.TEAL, ...detail });
+    }
+    box(x, 3.48, wallZPos + inward * 2.8, 4, 0.08, 0.34, { ...pale, ...detail });
+  };
+  const exhibition = (x, z, w, d) => {
+    box(x, 0, z, w, 1.45, d, { surface: 'wood', ink: INK.BROWN, noNav: true });
+    for (const side of [-1, 1]) {
+      box(x, 0.28, z + side * (d / 2 + 0.05), w - 0.38, 0.88, 0.08, { surface: 'cloth', ink: INK.TEAL, ...detail });
+      for (let i = 0; i < 3; i++) box(x - w * 0.3 + i * w * 0.3, 0.44, z + side * (d / 2 + 0.11), w * 0.2, 0.52, 0.03, { ...pale, ...detail });
+    }
+    box(x, 1.46, z, w + 0.12, 0.08, d + 0.12, { ...stone, ...detail });
   };
   // East 1 retains the long north/south wings and transverse bridges of its real footprint.
   wing(-78, -76, 82, -61, 15.4, { n: [-66, -25, 55], s: [-66, -25, 55], w: [-68], e: [-68] });
   wing(-78, -33, 82, -18, 15.4, { n: [-66, -25, 9, 55], s: [-66, -25, 9, 55], w: [-25], e: [-25] });
   wing(19, -60.65, 32, -33.35, 15.4, { n: [25.5], s: [25.5], w: [-47], e: [-47] });
+  for (const x of [-48, -7, 36]) classroom(x, -75.7, 1);
+  for (const x of [-47, -9, 38]) classroom(x, -18.3, -1);
   for (const x of [-74, -33, 67, 79]) {
     slab(x - 1.8, -60.6, x + 1.8, -33.4, 4.2, 0.35, { ...stone, noNav: x > 0 });
     for (const z of [-57, -37]) box(x, 0, z, 0.5, 3.85, 0.5, { ...pale, noNav: true });
@@ -761,8 +842,7 @@ function buildZijingang(B) {
   stairs(-66, 0, -44.6, '-z', 14, 4.2, { rise: 0.3, run: 0.8 });
   stairs(-9, 0, -49.4, '+z', 14, 4.2, { rise: 0.3, run: 0.8 });
   for (const x of [-52, -11, 45]) {
-    box(x, 0, -68.4, 7, 1.45, 2.2, { surface: 'wood', ink: INK.BROWN, noNav: true });
-    box(x, 0, -25.4, 7, 1.45, 2.2, { surface: 'wood', ink: INK.BROWN, noNav: true });
+    exhibition(x, -68.4, 7, 2.2); exhibition(x, x === -11 ? -27.8 : -25.4, 7, 2.2);
   }
   for (const x of [-66, 9, 67]) {
     box(x, 4.06, -17.3, 4.3, 13, 1.3, { ...dark, noNav: true });
@@ -771,41 +851,90 @@ function buildZijingang(B) {
     box(x, 17.1, -17.3, 4.8, 0.22, 1.8, { ...pale, ...detail });
   }
 
-  // The southwest annex is low and polygonal, unlike the distant administrative tower.
-  // Two overlapping inset boxes approximate its collision volume without square corners
-  // protruding beyond the twelve-sided visual shell.
-  const ax = -71, az = -4, ar = 11;
-  cyl(ax, 0, az, ar, 5.3, { ...pale, noCollide: true, seg: 12 });
-  collider(ax, 0, az, 18, 5.3, 11.8, { noNav: true }); collider(ax, 0, az, 11.8, 5.3, 18, { noNav: true });
-  cyl(ax, 5.35, az, ar + 0.6, 0.35, { ...stone, noCollide: true, seg: 12 });
+  // Yongman Hall is an enterable report room. Short wall collider sections follow its
+  // polygonal shell; the omitted east facets connect to real portals in the cream lobby.
+  const ax = -71, az = -7, ar = 11;
+  L.tactical.buildings.push({ x1: -82.5, z1: -18.5, x2: -56.3, z2: 4.5 });
+  const outline = Array.from({ length: 12 }, (_, i) => [ax + Math.sin(TAU * i / 12) * ar, az + Math.cos(TAU * i / 12) * ar]);
+  const floorCollider = (x1, z1, x2, z2, y, t) => collider((x1 + x2) / 2, y - t, (z1 + z2) / 2, x2 - x1, t, z2 - z1);
+  // Keep the proven floor boxes but draw the hall and entrance as one plinth. Its only
+  // side faces follow the exterior perimeter, never a seam across the interior floor.
+  const hallFloorShape = new THREE.Shape();
+  for (let i = 16; i <= 56; i++) {
+    const a = TAU * i / 48, x = ax + Math.sin(a) * ar, z = az + Math.cos(a) * ar;
+    if (i === 16) hallFloorShape.moveTo(x, -z); else hallFloorShape.lineTo(x, -z);
+  }
+  hallFloorShape.lineTo(-56.5, 1.5); hallFloorShape.lineTo(-56.5, 12.5); hallFloorShape.closePath();
+  const hallPlinth = new THREE.ExtrudeGeometry(hallFloorShape, { depth: 1.604, bevelEnabled: false, steps: 1 });
+  hallPlinth.rotateX(-Math.PI / 2); hallPlinth.translate(0, -1.4, 0);
+  hallPlinth.setIndex(Array.from({ length: hallPlinth.getAttribute('position').count }, (_, i) => i)); addGeo(hallPlinth, INK.BROWN, 'stone');
+  for (let i = 0; i < 22; i++) {
+    const z1 = az - ar + i, z2 = z1 + 1, zw = (z1 + z2) / 2;
+    const extent = Math.sqrt(Math.max(0.5, ar * ar - Math.min(Math.abs(z1 - az), Math.abs(z2 - az)) ** 2));
+    floorCollider(ax - extent, z1, ax + extent, z2, 0.2, 1.6);
+    collider(ax, 5.3, zw, extent * 2, 0.4, 1, { noNav: true });
+  }
+  const apothem = ar * Math.cos(Math.PI / 12), panelWidth = ar * 2 * Math.sin(Math.PI / 12);
+  for (let i = 0; i < 12; i++) {
+    if (i === 2 || i === 3) continue;
+    const a = TAU * (i + 0.5) / 12, sx = Math.sin(a), cz = Math.cos(a);
+    const panel = (w, h, d, y, offset, ink, surface) => {
+      const g = new THREE.BoxGeometry(w, h, d); g.rotateY(a); g.translate(ax + sx * (apothem + offset), y + h / 2, az + cz * (apothem + offset)); addGeo(g, ink, surface);
+    };
+    panel(panelWidth + 0.08, 5.3, 0.32, 0, 0, INK.BLACK, 'ceramic');
+    panel(panelWidth + 0.04, 5.3, 0.025, 0, -0.177, INK.BLACK, 'plaster');
+    for (const side of [-1, 1]) {
+      panel(panelWidth - 0.55, 2.8, 0.07, 1.15, side * 0.2, INK.TEAL, 'glass');
+      for (const y of [1, 4]) panel(panelWidth - 0.3, 0.15, 0.15, y, side * 0.25, INK.BLACK, 'ceramic');
+    }
+    const p = outline[i], q = outline[(i + 1) % 12];
+    for (let j = 0; j < 4; j++) {
+      const f = (j + 0.5) / 4;
+      collider(p[0] + (q[0] - p[0]) * f, 0, p[1] + (q[1] - p[1]) * f, Math.abs(q[0] - p[0]) / 4 + Math.abs(sx) * 0.32, 5.3, Math.abs(q[1] - p[1]) / 4 + Math.abs(cz) * 0.32, { noNav: true });
+    }
+  }
+  cyl(ax, 5.35, az, ar + 0.6, 0.35, { ...interior, noCollide: true, seg: 12 });
   const annexRoof = new THREE.SphereGeometry(ar + 0.6, 24, 8, 0, TAU, 0, Math.PI / 2);
   annexRoof.scale(1, 0.12, 1); annexRoof.translate(ax, 5.7, az); addGeo(annexRoof, INK.BLACK, 'ceramic');
-  box(-61.5, 0, 1.5, 7, 6.8, 8, { surface: 'plaster', ink: INK.BROWN, noNav: true });
-  box(-61.5, 0.12, 5.56, 4.3, 4.8, 0.08, { ...dark, ...detail });
-  for (const z of [-10, 2]) {
+  const cream = { surface: 'plaster', ink: INK.BROWN, noNav: true };
+  floorCollider(-64.5, -12.5, -56.5, -1.5, 0.2, 0.4);
+  wallX(-64.5, -56.5, -12.5, 0, 6.8, 0.35, [], cream);
+  wallX(-64.5, -56.5, -1.5, 0, 6.8, 0.35, [[-62.8, -58.2, 0, 3.6]], cream);
+  wallZ(-12.5, -1.5, -56.5, 0, 6.8, 0.35, [[-9.3, -4.7, 0, 3.6]], cream);
+  slab(-64.75, -12.75, -56.25, -1.25, 6.95, 0.25, cream);
+  for (const z of [-13, -1]) {
     const g = new THREE.BoxGeometry(0.36, 5.9, 0.4); g.rotateZ(-0.3); g.translate(-82.1, 2.7, z); addGeo(g, INK.BLACK, 'ceramic');
   }
-  for (let i = 0; i < 12; i++) {
-    const a = TAU * i / 12, g = new THREE.BoxGeometry(4.6, 2.6, 0.1);
-    g.rotateY(-a); g.translate(ax + Math.sin(a) * 10.7, 2.75, az + Math.cos(a) * 10.7); addGeo(g, INK.TEAL, 'glass');
+  box(-78, 0.2, -7, 3.8, 0.4, 8, { surface: 'wood', ink: INK.BROWN });
+  box(-79.8, 1.2, -7, 0.14, 2.6, 5.5, { ...dark, ...detail });
+  box(-79.69, 1.34, -7, 0.07, 2.32, 5.2, { ...interior, ...detail });
+  box(-77.2, 0.6, -9, 0.75, 1.05, 0.7, { surface: 'wood', ink: INK.BROWN, noNav: true });
+  for (const x of [-72, -68]) for (const z of [-11, -7, -3]) {
+    box(x, 0.62, z, 1.1, 0.12, 1.5, { surface: 'cloth', ink: INK.TEAL, ...detail });
+    box(x + 0.48, 0.74, z, 0.15, 0.75, 1.5, { surface: 'cloth', ink: INK.TEAL, ...detail });
+    box(x, 0.2, z, 0.16, 0.42, 1.25, { ...dark, ...detail });
+    collider(x, 0.2, z, 1.1, 1.29, 1.5, { noNav: true });
   }
+  spawn(-65.8, 0.28, -7); pickup(-78, 0.75, -6);
 
   // East 2 has one enclosed quadrangle in the surveyed footprint, with a lower glazed
   // eastern link. Wide portals leave both objectives reachable without jumping or grappling.
   wing(33, 13, 91, 24, 10.4, { n: [44, 73], s: [44, 73], w: [18.5], e: [18.5] });
   wing(33, 52, 91, 63, 10.4, { n: [44, 73], s: [44, 73], w: [57.5], e: [57.5] });
   wing(33, 24.4, 42, 51.6, 10.4, { w: [37], e: [37], n: [37.5], s: [37.5] });
+  classroom(57, 13.3, 1); classroom(57, 62.7, -1);
   slab(83.5, 24.4, 91, 51.6, 4.2, 0.35, stone);
   slab(83, 24.1, 91.5, 51.9, 8, 0.3, { ...pale, noNav: true });
   for (const z of [26, 33, 43, 50]) for (const x of [84, 90.5]) box(x, 0, z, 0.45, 7.7, 0.45, { ...pale, noNav: true });
   rail(83.5, 24.4, 83.5, 51.6, 4.2); rail(91, 24.4, 91, 35, 4.2); rail(91, 41, 91, 51.6, 4.2);
   stairs(103, 0, 38, '-x', 14, 4.2, { rise: 0.3, run: 0.85 });
   stairGuards(103, 38, '-x', 4.2);
-  for (const z of [18.5, 57.5]) for (const x of [55, 83]) box(x, 0, z, 5, 1.45, 2.2, { surface: 'wood', ink: INK.BROWN, noNav: true });
+  for (const z of [18.5, 57.5]) for (const x of [66.5, 83]) exhibition(x, z, 5, 2.2);
 
   // The two-level student corridor links the teaching buildings to the southern plaza.
+  L.tactical.buildings.push({ x1: 21, z1: -17.5, x2: 30.5, z2: 83 });
   slab(21, -17.5, 30.5, 83, 4.2, 0.32, stone);
-  slab(20.5, -17.9, 31, 83.4, 7.7, 0.25, { ...pale, noNav: true });
+  slab(20.5, -17.9, 31, 83.4, 7.7, 0.25, { ...interior, noNav: true });
   for (let z = -14; z <= 81; z += 10.5) for (const x of [21.4, 30.1]) if (!(x === 30.1 && z === 7)) box(x, 0, z, 0.45, 7.45, 0.45, { ...pale, noNav: true });
   for (const z of [4, 10]) box(30.1, 0, z, 0.45, 7.45, 0.45, { ...pale, noNav: true });
   rail(21, -17.5, 21, 68, 4.2); rail(21, 74, 21, 83, 4.2);
@@ -814,20 +943,43 @@ function buildZijingang(B) {
   slab(30.5, 7, 41.1, 10, 4.2, 0.32, stone); stairGuards(39, -4.9, '+z', 4.2);
   stairs(10, 0, 58.9, '+z', 14, 4.2, { rise: 0.3, run: 0.85 });
   slab(7.9, 70.8, 21, 74, 4.2, 0.32, stone); stairGuards(10, 58.9, '+z', 4.2);
-  for (const [x, z] of [[24, 13], [27, 47]]) box(x, 4.2, z, 3.5, 2.2, 0.35, { surface: 'wood', ink: INK.BROWN, noNav: true });
-  for (const z of [0, 27, 61]) box(25.7, 0, z, 3.6, 1.5, 1.1, { surface: 'wood', ink: INK.BROWN, noNav: true });
+  for (const [x, z] of [[24, 13], [27, 47]]) {
+    box(x, 4.2, z, 3.5, 2.2, 0.35, { surface: 'wood', ink: INK.BROWN, noNav: true });
+    for (const side of [-1, 1]) for (const dx of [-0.9, 0, 0.9]) box(x + dx, 4.68, z + side * 0.23, 0.68, 1.24, 0.07, { surface: 'cloth', ink: dx === 0 ? INK.TEAL : INK.ORANGE, ...detail });
+  }
+  for (const z of [0, 27, 61]) exhibition(25.7, z, 3.6, 1.1);
+  for (const y of [0.08, 4.22]) {
+    box(25.75, y, 32.75, 8.85, 0.025, 98.4, { surface: 'wood', ink: INK.BROWN, ...detail });
+    for (let z = -16; z < 82; z += 1.8) box(25.75, y + 0.029, z, 8.82, 0.007, 0.018, { ...dark, ...detail });
+  }
+  for (let z = -14; z <= 81; z += 5.25) {
+    box(25.75, 7.15, z, 9.65, 0.27, 0.16, { ...dark, ...detail });
+    box(25.75, 3.72, z, 1.3, 0.075, 0.42, { ...pale, ...detail });
+  }
+  for (const [x, y, z] of [[22.65, 0, 13], [28.5, 0, 43], [22.65, 4.2, -6], [28.5, 4.2, 64]]) {
+    box(x, y + 0.78, z, 1.3, 0.12, 3.2, { surface: 'wood', ink: INK.BROWN, ...detail });
+    for (const dz of [-1.2, 1.2]) box(x, y, z + dz, 0.1, 0.78, 0.35, { ...dark, ...detail });
+    collider(x, y, z, 1.3, 0.9, 3.2, { noNav: true });
+    box(x, y + 0.91, z, 0.5, 0.06, 0.75, { surface: 'cloth', ink: INK.TEAL, ...detail });
+  }
 
   // A white colonnade bends beside the lake. The ground-level route remains visible and
   // navigable beneath it; each butt joint shares an edge rather than overlapping roof faces.
   const walk = [[-46, 4, 15, 9], [-32, 13, 24, 9], [-13, 22, 31, 9], [4, 31, 15, 9]];
   for (const [x, z, w, d] of walk) {
-    slab(x - w / 2, z - d / 2, x + w / 2, z + d / 2, 3.8, 0.24, { ...pale, noNav: true });
+    slab(x - w / 2, z - d / 2, x + w / 2, z + d / 2, 3.8, 0.24, { ...interior, noNav: true });
     for (const dx of [-w / 2 + 1, w / 2 - 1]) for (const dz of [-d / 2 + 0.6, d / 2 - 0.6]) cyl(x + dx, 0, z + dz, 0.24, 3.56, { ...pale, noNav: true, seg: 8 });
+    for (let dx = -w / 2 + 0.8; dx < w / 2; dx += 1.8) box(x + dx, 3.35, z, 0.11, 0.2, d - 0.6, { ...dark, ...detail });
   }
   // A short footbridge crosses an inlet west of the teaching buildings, away from either
   // team spawn. Its stone abutments and rail match the embankment around the real lake.
   slab(-91, -13, -85, 18, 0.2, 0.65, stone); slab(-91, 18, -44, 24, 0.2, 0.65, stone);
   rail(-91, -13, -91, 24, 0.2); rail(-85, -13, -85, 18, 0.2); rail(-85, 18, -44, 18, 0.2); rail(-91, 24, -44, 24, 0.2);
+  L.tactical.paths.push([[-91, -13], [-85, -13], [-85, 18], [-44, 18], [-44, 24], [-91, 24]]);
+  box(-88, 0.211, 2.5, 5.5, 0.025, 30.5, { surface: 'wood', ink: INK.BROWN, ...detail });
+  box(-67.5, 0.211, 21, 46.5, 0.025, 5.5, { surface: 'wood', ink: INK.BROWN, ...detail });
+  for (let z = -12; z < 18; z += 1.2) box(-88, 0.239, z, 5.47, 0.007, 0.022, { ...dark, ...detail });
+  for (let x = -90; x < -44; x += 1.2) box(x, 0.239, 21, 0.022, 0.007, 5.47, { ...dark, ...detail });
 
   const planter = (x, z, w = 5, d = 3) => {
     box(x, 0, z, w, 0.65, d, { ...stone, noNav: true });
@@ -836,20 +988,28 @@ function buildZijingang(B) {
     for (let i = 0; i < n; i++) sphere(x - w * 0.35 + i * w * 0.7 / (n - 1), 1, z, 0.62, { surface: 'foliage', ink: INK.GREEN });
   };
   const tree = (x, z, i) => {
-    const h = 4.8 + i % 3 * 0.4, r = 2.3 + i % 4 * 0.2;
-    cyl(x, 0, z, 0.24, h, { surface: 'wood', ink: INK.BROWN, noNav: true, seg: 7 });
-    sphere(x, h + 0.6, z, r, { surface: 'foliage', ink: i % 5 === 0 ? INK.OLIVE : INK.GREEN, seg: 7 });
-    sphere(x - 0.8, h + 1.6, z + 0.4, r * 0.7, { surface: 'foliage', ink: INK.GREEN, seg: 7 });
+    const h = 4.8 + i % 3 * 0.4, willow = x < -35 && z > -22, cedar = !willow && i % 4 === 0;
+    cyl(x, 0, z, 0.24, h + (cedar ? 1.5 : 0), { surface: 'wood', ink: INK.BROWN, noNav: true, seg: 7 });
+    if (cedar) {
+      for (let j = 0; j < 4; j++) { const g = new THREE.ConeGeometry(2.3 - j * 0.4, 3.1, 9); g.translate(x, 3.7 + j * 1.3, z); addGeo(g, i % 8 ? INK.GREEN : INK.OLIVE, 'foliage'); }
+    } else {
+      for (let j = 0; j < 5; j++) {
+        const a = j * TAU / 5 + i * 0.41, r = willow ? 1.9 : 1.65;
+        const g = new THREE.SphereGeometry(r, 8, 6); g.scale(1, willow ? 1.65 : 0.85, 1);
+        g.translate(x + Math.sin(a) * 1.25, h + (willow ? -0.5 : 0.7) + j % 2 * 0.6, z + Math.cos(a) * 1.2); addGeo(g, j % 3 ? INK.GREEN : INK.OLIVE, 'foliage');
+      }
+      sphere(x, h + 1.1, z, 1.8, { surface: 'foliage', ink: INK.GREEN, seg: 8 });
+    }
   };
   const bench = (x, z, alongX = true) => {
     const w = alongX ? 3 : 0.65, d = alongX ? 0.65 : 3;
     box(x, 0.48, z, w, 0.14, d, { surface: 'wood', ink: INK.BROWN, ...detail });
     box(x + (alongX ? 0 : -0.27), 0.66, z + (alongX ? -0.27 : 0), alongX ? 3 : 0.1, 0.7, alongX ? 0.1 : 3, { surface: 'wood', ink: INK.BROWN, ...detail });
     for (const s of [-1, 1]) box(x + (alongX ? s : 0), 0, z + (alongX ? 0 : s), 0.12, 0.5, 0.45, { ...dark, ...detail });
-    collider(x, 0, z, w, 0.9, d, { noNav: true });
+    collider(x, 0, z, w, 1.36, d, { noNav: true });
   };
   for (const [x, z, w, d] of [[-47, -46, 9, 7], [-16, -46, 8, 7], [9, -45, 5, 8], [51, -47, 9, 8], [59, 34, 8, 6], [73, 45, 8, 4], [-14, 0, 13, 5], [7, 15, 7, 5], [4, 50, 9, 5], [-25, 61, 10, 5], [59, 71, 14, 3], [63, -82, 13, 3]]) planter(x, z, w, d);
-  const trees = [[-87, -70], [-86, -50], [-85, -31], [-55, -7], [-41, -8], [-20, -9], [1, -9], [52, 3], [72, 3], [87, -9], [87, -48], [60, -47], [-46, -46], [-16, -46], [57, 43], [73, 32], [-41, 29], [-40, 46], [-49, 59], [-60, 75], [-23, 73], [-3, 77], [12, 48], [7, 60], [46, 71], [84, 71]];
+  const trees = [[-87, -70], [-86, -50], [-85, -31], [-53, -14], [-41, -8], [-20, -9], [1, -9], [52, 3], [72, 3], [87, -9], [87, -48], [60, -47], [-46, -46], [-16, -46], [57, 43], [73, 32], [-41, 29], [-40, 46], [-49, 59], [-60, 75], [-23, 73], [-3, 77], [12, 48], [7, 60], [46, 71], [84, 71]];
   for (let z = -80; z <= 80; z += 20) trees.push([116, z]);
   trees.forEach(([x, z], i) => tree(x, z, i));
   for (const [x, z, dir] of [[-87, -61, false], [-86, -41, false], [-51, 15, false], [-42, 37, false], [-51, 67, false], [-39, -42, true], [0, -42, true], [50, 44, false], [73, 29, true], [-5, 3, true], [15, 53, false], [76, 69, true]]) bench(x, z, dir);
@@ -865,6 +1025,14 @@ function buildZijingang(B) {
     for (const dz of [-0.72, 0.72]) { const g = new THREE.TorusGeometry(0.42, 0.055, 5, 12); g.rotateY(Math.PI / 2); g.translate(x + 0.3, 0.46, z + dz); addGeo(g, INK.BLACK, 'metal'); }
     box(x + 0.3, 0.85, z, 0.09, 0.1, 1.45, { surface: 'metal', ink: i % 2 ? INK.TEAL : INK.ORANGE, ...detail });
     box(x + 0.3, 0.88, z - 0.65, 0.65, 0.08, 0.08, { ...dark, ...detail });
+    const frame = [[0.46, -0.72], [0.46, 0.72], [0.91, -0.3], [0.91, 0.36], [0.48, 0]];
+    for (const [ai, bi] of [[0, 2], [2, 4], [4, 0], [4, 3], [3, 1], [2, 3], [4, 1]]) {
+      const a = new THREE.Vector3(x + 0.3, frame[ai][0], z + frame[ai][1]), b = new THREE.Vector3(x + 0.3, frame[bi][0], z + frame[bi][1]), d = b.clone().sub(a);
+      const g = new THREE.CylinderGeometry(0.04, 0.04, d.length(), 5);
+      g.applyMatrix4(new THREE.Matrix4().makeRotationFromQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), d.normalize())));
+      g.translate((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2); addGeo(g, i % 2 ? INK.TEAL : INK.ORANGE, 'metal');
+    }
+    box(x + 0.3, 1.03, z + 0.36, 0.34, 0.08, 0.44, { ...dark, ...detail });
   }
 
   // Wall-mounted lettering is ordinary merged geometry, so wayfinding also works offline

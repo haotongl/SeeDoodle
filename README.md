@@ -38,7 +38,12 @@ reconnect — the client retries on its own, backing off from 200 ms to 4 s. Twe
 ends the seat for good. The host is the exception: it owns the enemies and the wave clock, so it is
 handed on after 3.5 s rather than stalling everyone else's match while it is away.
 
-Tab shows every player's round-trip time alongside the score, measured server-side once a second.
+Hold Tab for the tactical map and scores, including each player's server-measured round-trip time.
+While the panel is open, the mouse wheel scrolls the player list instead of changing weapons.
+On touch screens, tap MAP to open it and tap again or fire to close; a controller's Create button
+toggles the same panel. Solo play shows the map without a scoreboard. The map shows living teammates
+and objective sites, never opponents. Only attackers see carried or dropped C4; everyone sees a
+planted bomb. A small heading and area label helps with navigation while the map is closed.
 
 ### Connecting to someone else's machine
 
@@ -66,6 +71,9 @@ Picked by the host in the lobby, before the match starts:
 The host can add bots and arrange teams before starting either team mode. Bots navigate the same
 level, fight through the same damage checks, and can carry, plant and defuse C4. Weapon restrictions
 are independent of the game mode; the knife rule allows unlimited grenades.
+Falling out of a team map resolves one death through the normal life/respawn rules, including bots.
+A lost C4 returns to a reachable surface, preferring its carrier's last stable ground. Bots preserve
+an ongoing defuse and assign a replacement by walkable route if the current defuser dies.
 
 ### Maps
 
@@ -94,6 +102,12 @@ This is a compressed game interpretation of one block, not the whole campus or a
 Courtyards, lakefront paths, the wooden bridge and upper walkways provide different routes.
 Entrances, accessible floors, stairs, cover, bases and A/B positions are adapted for play.
 Ground-floor rooms and selected walkways are accessible; upper teaching floors are scenery.
+The teaching wings include eight enterable ground-floor rooms, window bays and covered entrances.
+Yongman Hall has working entrances, an interior lecture space, a dais and seating. Display islands,
+reading tables, corridor beams, lakeside paving and distinct tree forms help identify the routes.
+Sunlit Toon adds cached static sunlight shadows and restrained stone, tile, wood, glass and water
+finishes. The sun shadow is baked when the map changes rather than following the camera; Classic
+Ink keeps its original rendering.
 
 Layout references are the [official campus map](https://map.zju.edu.cn/index.html) and
 [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), whose data is available

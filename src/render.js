@@ -256,6 +256,10 @@ uniform float uLowHp;
 uniform float uViewOpacity;
 uniform float uMapMood;
 uniform vec3 uHaze;
+uniform highp sampler2DShadow tSunDepth;
+uniform mat4 uSunMatrix;
+uniform float uSunDepthRange;
+uniform float uSunEnabled;
 uniform vec3 uInks[${INK_COLORS.length}];
 uniform mat4 uInvProj;
 uniform mat4 uInvView;
@@ -293,6 +297,13 @@ vec3 skyColor(vec3 ray) {
   sky += vec3(0.13, 0.095, 0.025) * sun;
   return mix(sky, sky * vec3(0.68, 0.80, 0.89), uMapMood * 0.5);
 }
+float tileJoint(vec2 uv, float scale, float width) {
+  vec2 q = uv * scale;
+  vec2 footprint = max(fwidth(q), vec2(0.0001));
+  vec2 edge = min(fract(q), 1.0 - fract(q));
+  vec2 seam = 1.0 - smoothstep(vec2(width), vec2(width) + footprint, edge);
+  return max(seam.x, seam.y) * (1.0 - smoothstep(0.18, 0.48, max(footprint.x, footprint.y)));
+}
 vec3 surfaceColor(float packed, vec3 p, vec2 uv, float brush) {
   float kind = floor(packed / 16.0 + 0.001);
   float ink = mod(packed, 16.0);
@@ -308,19 +319,20 @@ vec3 surfaceColor(float packed, vec3 p, vec2 uv, float brush) {
     else if (ink > 4.5 && ink < 5.5) base = vec3(0.87, 0.64, 0.61);
     base *= 0.98 + brush * 0.055;
   } else if (kind < 2.5) {
-    base = mix(vec3(0.40, 0.44, 0.45), vec3(0.52, 0.55, 0.53), broad);
-    base *= 0.96 + brush * 0.08;
+    base = mix(vec3(0.34, 0.39, 0.40), vec3(0.43, 0.46, 0.45), broad);
+    if (ink > 7.5) base = mix(vec3(0.47, 0.44, 0.32), vec3(0.57, 0.55, 0.39), broad);
+    base *= 0.98 + brush * 0.04;
   } else if (kind < 3.5) {
-    base = mix(vec3(0.59, 0.64, 0.64), vec3(0.76, 0.77, 0.70), broad);
-    base *= 0.96 + brush * 0.08;
+    base = mix(vec3(0.63, 0.67, 0.66), vec3(0.76, 0.78, 0.72), broad);
+    base *= (0.98 + brush * 0.04) * (1.0 - tileJoint(uv, 0.85, 0.008) * 0.045);
   } else if (kind < 4.5) {
-    float grain = vnoise(vec2(uv.x * 0.9, uv.y * 14.0));
-    base = mix(vec3(0.39, 0.23, 0.12), vec3(0.65, 0.45, 0.24), grain * 0.7 + brush * 0.3);
+    float grain = vnoise(vec2(uv.x * 0.42, uv.y * 9.0));
+    base = mix(vec3(0.52, 0.34, 0.18), vec3(0.67, 0.48, 0.27), grain * 0.6 + brush * 0.4);
   } else if (kind < 5.5) {
     base = mix(vec3(0.20, 0.29, 0.31), vec3(0.34, 0.42, 0.43), broad);
     if (ink < 1.5 || ink > 2.5) base = mix(base, tint, 0.12);
   } else if (kind < 6.5) {
-    base = mix(vec3(0.25, 0.52, 0.62), vec3(0.53, 0.75, 0.77), broad);
+    base = mix(vec3(0.15, 0.34, 0.40), vec3(0.25, 0.48, 0.54), broad);
   } else if (kind < 7.5) {
     base = mix(vec3(0.25, 0.46, 0.22), vec3(0.48, 0.64, 0.32), broad * 0.65 + brush * 0.35);
   } else if (kind < 8.5) {
@@ -335,17 +347,28 @@ vec3 surfaceColor(float packed, vec3 p, vec2 uv, float brush) {
     base = mix(tint, vec3(0.95, 0.91, 0.83), 0.14) * (0.975 + brush * 0.05);
   } else if (kind < 10.5) {
     float ripple = sin(p.x * 1.15 + p.z * 0.45 + uTime * 0.65) * sin(p.z * 0.72 - uTime * 0.38);
-    base = mix(vec3(0.16, 0.39, 0.36), vec3(0.35, 0.58, 0.52), broad);
-    base += vec3(0.045, 0.055, 0.05) * smoothstep(0.68, 0.96, ripple);
+    base = mix(vec3(0.13, 0.31, 0.28), vec3(0.25, 0.44, 0.38), broad);
+    base += vec3(0.025, 0.035, 0.028) * smoothstep(0.68, 0.96, ripple);
   } else {
-    base = mix(vec3(0.81, 0.83, 0.80), vec3(0.92, 0.92, 0.86), broad) * (0.99 + brush * 0.025);
+    base = mix(vec3(0.87, 0.89, 0.86), vec3(0.95, 0.95, 0.91), broad);
+    if (ink > 7.5 && ink < 8.5) base = mix(vec3(0.64, 0.65, 0.62), vec3(0.76, 0.76, 0.70), broad);
+    else if (ink > 0.5 && ink < 1.5) base = vec3(0.70, 0.43, 0.32);
+    base *= (0.995 + brush * 0.015) * (1.0 - tileJoint(uv, 6.0, 0.012) * 0.06);
   }
   return base;
 }
-float occlusion(vec2 uv, float depth, float radius) {
-  float nearDepth = linDepth(texture2D(tDepth, uv).x);
+float occlusion(float nearDepth, float depth, float radius) {
   float delta = depth - nearDepth;
   return smoothstep(0.025, radius * 0.3, delta) * (1.0 - smoothstep(radius * 0.3, radius, delta));
+}
+float sunVisibility(vec3 p, vec3 normal) {
+  if (uSunEnabled < 0.5 || uViewOpacity >= 0.0) return 1.0;
+  vec4 projected = uSunMatrix * vec4(p + normal * 0.055, 1.0);
+  vec3 q = projected.xyz / projected.w * 0.5 + 0.5;
+  if (q.x < 0.002 || q.x > 0.998 || q.y < 0.002 || q.y > 0.998 || q.z < 0.0 || q.z > 1.0) return 1.0;
+  float bias = (0.035 + 0.06 * (1.0 - max(dot(normal, normalize(vec3(0.38, 0.82, 0.42))), 0.0))) / uSunDepthRange;
+  // WebGL 2 filters four depth comparisons in one hardware shadow lookup.
+  return texture(tSunDepth, vec3(q.xy, q.z - bias));
 }
 void main() {
   vec2 px = 1.0 / uRes;
@@ -383,21 +406,33 @@ void main() {
     float ndl = clamp(s.r * 2.0 - 1.0, -1.0, 1.0);
     float lit = smoothstep(-0.18, 0.85, ndl);
     float bounce = max(-wn.y, 0.0);
+    float sun = mix(1.0, sunVisibility(wp, wn), smoothstep(0.8, 2.0, d));
     vec3 ambient = mix(vec3(0.58, 0.68, 0.79), vec3(0.82, 0.76, 0.62), bounce * 0.45);
-    vec3 light = ambient * 0.72 + vec3(0.53, 0.43, 0.29) * lit;
+    vec3 light = ambient * 0.76 + vec3(0.58, 0.49, 0.35) * lit * sun;
     col = base * light;
     vec3 sunDir = normalize(vec3(0.38, 0.82, 0.42));
     vec3 halfDir = normalize(sunDir - ray);
     float metal = step(4.5, kind) * (1.0 - step(6.5, kind));
     float gloss = pow(max(dot(wn, halfDir), 0.0), mix(24.0, 56.0, metal));
     float rim = pow(1.0 - max(dot(n, normalize(-vp)), 0.0), 3.0) * max(wn.y * 0.5 + 0.5, 0.0);
-    col += vec3(1.0, 0.87, 0.63) * gloss * mix(0.035, 0.23, metal);
+    col += vec3(1.0, 0.87, 0.63) * gloss * mix(0.035, 0.23, metal) * sun;
     col += vec3(0.66, 0.82, 0.89) * rim * mix(0.075, 0.16, metal);
-    float reach = clamp(950.0 / max(d, 3.0), 2.0, 10.0) * sc;
-    vec2 aoStep = px * reach;
+    if (kind > 5.5 && kind < 6.5) {
+      vec3 reflection = reflect(ray, wn);
+      float fresnel = 0.18 + 0.36 * pow(1.0 - abs(dot(wn, ray)), 4.0);
+      vec3 reflectedSky = mix(vec3(0.84, 0.89, 0.87), vec3(0.34, 0.64, 0.80), smoothstep(-0.1, 0.85, reflection.y));
+      col = mix(col, reflectedSky * vec3(0.77, 0.87, 0.91), fresnel);
+    } else if (kind > 9.5 && kind < 10.5) {
+      vec3 waterN = normalize(wn + vec3(sin(wp.x * 0.8 + uTime * 0.6) * 0.022, 0.0, cos(wp.z * 0.95 - uTime * 0.42) * 0.018));
+      float fresnel = 0.15 + 0.48 * pow(1.0 - abs(dot(waterN, ray)), 3.0);
+      vec3 reflectedSky = mix(vec3(0.84, 0.89, 0.87), vec3(0.34, 0.64, 0.80), smoothstep(-0.1, 0.85, reflect(ray, waterN).y));
+      col = mix(col, reflectedSky * vec3(0.72, 0.88, 0.85), fresnel);
+    }
     float radius = clamp(d * 0.035, 0.16, 1.8);
-    float ao = occlusion(vUv + vec2(aoStep.x, 0.0), d, radius) + occlusion(vUv - vec2(aoStep.x, 0.0), d, radius)
-             + occlusion(vUv + vec2(0.0, aoStep.y), d, radius) + occlusion(vUv - vec2(0.0, aoStep.y), d, radius);
+    // Reuse contour samples for small contact seams; the cached sun map supplies the
+    // large-scale depth cues without a second, noisy screen-space sampling pattern.
+    float ao = occlusion(linDepth(zl), d, radius) + occlusion(linDepth(zr), d, radius)
+             + occlusion(linDepth(zu), d, radius) + occlusion(linDepth(zd), d, radius);
     col *= 1.0 - ao * 0.065;
     col = mix(col, col * vec3(0.67, 0.79, 0.87), uMapMood * 0.3);
     float haze = smoothstep(uHaze.x, uHaze.y, d) * uHaze.z;
@@ -439,6 +474,8 @@ export class InkRenderer {
         uLowHp: { value: 0 }, uViewOpacity: { value: -1 }, uLineSpacing: { value: 60 }, uPaper: { value: new THREE.Vector3(0.965, 0.955, 0.905) }, uInks: { value: INK_COLORS },
         uInvProj: { value: new THREE.Matrix4() }, uInvView: { value: new THREE.Matrix4() },
         tSurface: { value: fallback }, uMapMood: { value: 0 }, uHaze: { value: new THREE.Vector3(38, 210, 0.72) },
+        tSunDepth: { value: null }, uSunMatrix: { value: new THREE.Matrix4() },
+        uSunDepthRange: { value: 1 }, uSunEnabled: { value: 0 },
       },
       vertexShader: postVert, fragmentShader: postFrag, depthTest: false, depthWrite: false,
     });
@@ -447,6 +484,7 @@ export class InkRenderer {
     this._postQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), this.post); this.postScene.add(this._postQuad);
     this._clear = new THREE.Color(1, 0, 0);
     this._ld = new THREE.Vector3();
+    this.sunStats = { builds: 0, casters: 0, size: 0, buildMs: 0 };
     this.resize();
     if (!this.fixedSize) window.addEventListener('resize', () => this.resize());
   }
@@ -472,7 +510,66 @@ export class InkRenderer {
     this.map = key || 'district';
     this.post.uniforms.uMapMood.value = this.map === 'undercity' ? 1 : 0;
     // The campus spans eight Depot arenas; keep its distant route landmarks legible.
-    this.post.uniforms.uHaze.value.set(...(this.map === 'zijingang' ? [75, 360, 0.5] : [38, 210, 0.72]));
+    this.post.uniforms.uHaze.value.set(...(this.map === 'zijingang' ? [95, 360, 0.32] : [38, 210, 0.72]));
+  }
+  setLevelGeometry(level) {
+    // Cache only immutable map meshes. Players, viewmodels and moving/breakable props
+    // never enter this scene, so a camera turn does not redraw or move the sun map.
+    this.post.uniforms.uSunEnabled.value = 0;
+    this._sunScene?.clear();
+    this._sunScene = new THREE.Scene();
+    if (!this._sunMaterial) this._sunMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.BasicDepthPacking, side: THREE.FrontSide, polygonOffset: true, polygonOffsetFactor: 1.5, polygonOffsetUnits: 2 });
+    const moving = new Set([...(level.animated || []).map(a => a.mesh), ...(level.breakables || []).map(b => b.group)]);
+    const bounds = new THREE.Box3();
+    for (const root of level.meshes || []) {
+      if (moving.has(root) || root.userData.skin === 'classic') continue;
+      root.updateWorldMatrix(true, true);
+      root.traverse(source => {
+        if (!source.isMesh || !source.geometry || source.isSkinnedMesh || source.isInstancedMesh) return;
+        const kind = source.material?.uniforms?.uSurface?.value;
+        if (kind === SURFACE.WATER || kind === SURFACE.GLASS || kind === SURFACE.CLOTH || kind === SURFACE.SKIN) return;
+        const mesh = new THREE.Mesh(source.geometry, this._sunMaterial);
+        mesh.matrixAutoUpdate = false; mesh.matrix.copy(source.matrixWorld);
+        this._sunScene.add(mesh); bounds.expandByObject(mesh);
+      });
+    }
+    this.sunStats.casters = this._sunScene.children.length;
+    if (bounds.isEmpty()) { this._sunPending = false; return; }
+    const center = bounds.getCenter(new THREE.Vector3()), extent = bounds.getSize(new THREE.Vector3());
+    const distance = Math.max(30, extent.length());
+    const camera = this._sunCamera ||= new THREE.OrthographicCamera();
+    camera.position.copy(center).addScaledVector(LIGHT_WORLD, distance); camera.lookAt(center); camera.updateMatrixWorld(true);
+    const lightBounds = new THREE.Box3(), corner = new THREE.Vector3();
+    for (let i = 0; i < 8; i++) lightBounds.expandByPoint(corner.set(i & 1 ? bounds.max.x : bounds.min.x, i & 2 ? bounds.max.y : bounds.min.y, i & 4 ? bounds.max.z : bounds.min.z).applyMatrix4(camera.matrixWorldInverse));
+    camera.left = lightBounds.min.x - 2; camera.right = lightBounds.max.x + 2;
+    camera.bottom = lightBounds.min.y - 2; camera.top = lightBounds.max.y + 2;
+    camera.near = Math.max(0.1, -lightBounds.max.z - 5); camera.far = -lightBounds.min.z + 5; camera.updateProjectionMatrix();
+    const u = this.post.uniforms;
+    u.uSunMatrix.value.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+    u.uSunDepthRange.value = camera.far - camera.near;
+    this._sunPending = true;
+  }
+  _bakeSun() {
+    if (this.skin !== 'toon' || (!this._sunPending && this.post.uniforms.tSunDepth.value)) return;
+    const start = performance.now(), r = this.renderer;
+    // Standalone avatar previews still need a complete comparison texture, even
+    // with sunlight disabled. Clear a single texel until a map is attached.
+    const size = this._sunPending ? Math.min(r.capabilities.maxTextureSize, window.matchMedia?.('(pointer: coarse)').matches ? 1024 : 2048) : 1;
+    if (!this._sunRt) {
+      const depthTexture = new THREE.DepthTexture(size, size); depthTexture.type = THREE.UnsignedIntType;
+      depthTexture.compareFunction = THREE.LessEqualCompare; depthTexture.minFilter = depthTexture.magFilter = THREE.LinearFilter;
+      this._sunRt = new THREE.WebGLRenderTarget(size, size, { depthTexture, depthBuffer: true, stencilBuffer: false, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, generateMipmaps: false });
+      this.post.uniforms.tSunDepth.value = depthTexture;
+    } else if (this._sunRt.width !== size) this._sunRt.setSize(size, size);
+    const target = r.getRenderTarget(), clearColor = r.getClearColor(new THREE.Color()), clearAlpha = r.getClearAlpha();
+    try {
+      r.setRenderTarget(this._sunRt); r.setClearColor(0xffffff, 1); r.clear(true, true, false);
+      if (this._sunPending) {
+        r.render(this._sunScene, this._sunCamera);
+        this.post.uniforms.uSunEnabled.value = 1; this._sunPending = false;
+        this.sunStats.size = size; this.sunStats.builds++; this.sunStats.buildMs = performance.now() - start;
+      }
+    } finally { r.setRenderTarget(target); r.setClearColor(clearColor, clearAlpha); }
   }
   resize() {
     const w = Math.max(2, this.fixedSize?.width || window.innerWidth), h = Math.max(2, this.fixedSize?.height || window.innerHeight);
@@ -484,6 +581,7 @@ export class InkRenderer {
     const u = this.post.uniforms; u.uRes.value.set(rw, rh); u.uAspect.value = w / h; u.uLineSpacing.value = rh / 13.5;
   }
   render(time, fx = {}) {
+    this._bakeSun();
     shared.uTime.value = time;
     this.camera.updateMatrixWorld(); this.camera.matrixWorldInverse.copy(this.camera.matrixWorld).invert();
     shared.uLightDir.value.copy(LIGHT_WORLD).transformDirection(this.camera.matrixWorldInverse);
