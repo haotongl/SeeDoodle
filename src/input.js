@@ -26,20 +26,23 @@ export class Input {
     this.pointerLocked = false; this.anyInput = false; this.lastPadButtons = [];
     this.onLockChange = null; this.onAnyInput = null; this.lastActive = performance.now();
     this.invertY = false; this.onDeviceChange = null; this.onControlCancel = null;
+    this.holdTimes = {}; this.holdSources = {}; this.timedTouch = new Set();
     const cancelControls = () => {
       this.keys = {}; this.mouseBtns = {}; this.pressQueue = {}; this.framePresses = {};
       if (this.onControlCancel) this.onControlCancel();
+      for (const a of Object.keys(this.holdSources)) for (const source of [...this.holdSources[a]]) this.markHold(a, false, source);
     };
 
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
       this.lastActive = performance.now(); const a = KEYMAP[e.code]; if (a) { this.keys[a] = true; if (this.usingGamepad && this.onDeviceChange) this.onDeviceChange(false); this.usingGamepad = false; }
       if (a) this.pressQueue[a] = true;
+      if (a) this.markHold(a, true, 'key:' + e.code);
       if (!e.shiftKey) this.keys.sprint = false;
       if (['Space', 'Tab', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
       this.anyInput = true;
     });
-    window.addEventListener('keyup', (e) => { const a = KEYMAP[e.code]; if (a) this.keys[a] = false; if (!e.shiftKey) this.keys.sprint = false; });
+    window.addEventListener('keyup', (e) => { const a = KEYMAP[e.code]; if (a) { this.keys[a] = false; this.markHold(a, false, 'key:' + e.code); } if (!e.shiftKey) this.keys.sprint = false; });
     document.addEventListener('visibilitychange', () => { if (document.hidden) cancelControls(); });
     window.addEventListener('blur', cancelControls);
     this.padState = {}; this.padPrev = {};
@@ -53,11 +56,12 @@ export class Input {
     document.addEventListener('mousedown', (e) => {
       const a = MOUSEMAP[e.button]; if (a) this.mouseBtns[a] = true;
       if (a && this.pointerLocked) this.pressQueue[a] = true;
+      if (a) this.markHold(a, true, 'mouse:' + e.button);
       if (this.usingGamepad && this.onDeviceChange) this.onDeviceChange(false);
       this.usingGamepad = false; this.anyInput = true; this.lastActive = performance.now();
       if (e.button === 1 || e.button === 3 || e.button === 4) e.preventDefault();
     });
-    document.addEventListener('mouseup', (e) => { const a = MOUSEMAP[e.button]; if (a) this.mouseBtns[a] = false; });
+    document.addEventListener('mouseup', (e) => { const a = MOUSEMAP[e.button]; if (a) { this.mouseBtns[a] = false; this.markHold(a, false, 'mouse:' + e.button); } });
     document.addEventListener('contextmenu', (e) => e.preventDefault());
     document.addEventListener('wheel', (e) => { this.wheel += Math.sign(e.deltaY); }, { passive: true });
     document.addEventListener('pointerlockchange', () => {
@@ -128,6 +132,10 @@ export class Input {
       this._pad = pad;
     } else this._pad = null;
     this.padPrev = this.padState; this.padState = padS;
+    for (const a of ['fire', 'grenade', 'aim', 'melee', 'nadeCancel', 'pause']) {
+      this.markHold(a, !!padS[a], 'pad');
+      if (!this.timedTouch.has(a)) this.markHold(a, !!this.touchKeys[a], 'touch');
+    }
 
     // a thumb on the stick outranks both: on a phone there is nothing else driving these
     if (this.tmove.x || this.tmove.y) { mx = this.tmove.x; my = this.tmove.y; }
@@ -137,6 +145,17 @@ export class Input {
     this.look.x = lx; this.look.y = this.invertY ? -ly : ly;
   }
 
+  // Input events preserve real press/release times even when rendering misses the whole hold.
+  markHold(a, down, source = 'touch') {
+    const sources = this.holdSources[a] ||= new Set(), wasHeld = sources.size > 0;
+    if (down) sources.add(source); else sources.delete(source);
+    const held = sources.size > 0; if (held === wasHeld) return;
+    const now = performance.now();
+    if (held) this.holdTimes[a] = { start: now, end: null, held: true };
+    else if (this.holdTimes[a]) { this.holdTimes[a].end = now; this.holdTimes[a].held = false; }
+  }
+  markTouchHold(a, down) { this.timedTouch.add(a); this.markHold(a, down, 'touch'); }
+  holdTiming(a) { return this.holdTimes[a] || null; }
   down(a) { return !!this.state[a]; }
   get idleSeconds() { return (performance.now() - this.lastActive) / 1000; }
   pressed(a) { return !!this.framePresses[a] || (!!this.state[a] && !this.prev[a]) || (!!this.padState[a] && !this.padPrev[a]); }

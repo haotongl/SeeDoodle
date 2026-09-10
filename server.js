@@ -478,7 +478,7 @@ function noteGrenade(client, d, now) {
   } else {
     const slack = Math.min(1500, rttOf(client) + 750);
     if (d.expiresAt > now + GRENADE_FUSE_MS + slack || d.expiresAt < now - slack) return deny('grenade fuse out of range');
-    if (d.phase === 'armed' && d.expiresAt < now + GRENADE_FUSE_MS - slack) return deny('grenade armed too late');
+    // Input uses real elapsed time, so a slow frame may report a pin that was already pulled.
     const self = whereAt(client, now);
     if (!self || len3(sub(pos, [self.x, self.y + 0.9, self.z])) > ORIGIN_SLACK) return deny('grenade did not start at the holder');
     if (client.grenades.size >= GRENADE_LIMIT || !withinFireRate(client, 'grenade', now)) return deny('too many grenades');

@@ -71,7 +71,7 @@ export class TouchControls {
   setActive(on) {
     if (on === this.active) return;
     this.active = on;
-    if (!on) { this.ptrs.clear(); this.stick = null; this.frames = {}; this.aimOn = false; this._syncBtns(); this._syncStick(); }
+    if (!on) { for (const a of Object.keys(this.frames)) this.input.markTouchHold(a, false); this.ptrs.clear(); this.stick = null; this.frames = {}; this.aimOn = false; this._syncBtns(); this._syncStick(); }
   }
 
   _btnAt(e) { return e.target && e.target.closest ? e.target.closest('.tb') : null; }
@@ -134,8 +134,8 @@ export class TouchControls {
     else if (p.kind === 'btn') { this._release(p.a); p.btn.classList.remove('on'); }
   }
 
-  _press(a) { const f = (this.frames[a] ||= { down: 0, n: 0 }); f.down++; f.n = 0; }
-  _release(a) { const f = this.frames[a]; if (f) f.down = Math.max(0, f.down - 1); }
+  _press(a) { const f = (this.frames[a] ||= { down: 0, n: 0 }); f.down++; f.n = 0; this.input.markTouchHold(a, true); }
+  _release(a) { const f = this.frames[a]; if (f) { f.down = Math.max(0, f.down - 1); this.input.markTouchHold(a, f.down > 0); } }
 
   _syncStick() {
     const s = this.stick, el = this.stickEl;

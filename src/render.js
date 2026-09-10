@@ -104,6 +104,7 @@ uniform float uFlash;
 uniform float uSlow;
 uniform float uLineSpacing;
 uniform float uLowHp;
+uniform float uViewOpacity;
 uniform vec3 uPaper;
 uniform vec3 uInks[${INK_COLORS.length}];
 uniform mat4 uInvProj;
@@ -136,6 +137,7 @@ void main() {
   vec2 suv = vUv + wob * 2.0 * sc * px;
   vec4 s = texture2D(tScene, suv);
   float z = texture2D(tDepth, suv).x;
+  if (uViewOpacity >= 0.0 && z >= 0.999999) discard;
   float d = linDepth(z);
   float o = 1.15 * sc;
   vec2 ox = vec2(o, 0.0) * px, oy = vec2(0.0, o) * px;
@@ -233,7 +235,7 @@ void main() {
   col = mix(col, uPaper, uFlash);
   float lum = dot(col, vec3(0.3, 0.5, 0.2));
   col = mix(col, vec3(lum) * vec3(0.8, 0.86, 1.0), uSlow * 0.55);
-  gl_FragColor = vec4(col, 1.0);
+  gl_FragColor = vec4(col, uViewOpacity >= 0.0 ? uViewOpacity : 1.0);
 }`;
 
 const toonFrag = /* glsl */`
@@ -251,6 +253,7 @@ uniform float uHurt;
 uniform float uFlash;
 uniform float uSlow;
 uniform float uLowHp;
+uniform float uViewOpacity;
 uniform float uMapMood;
 uniform vec3 uInks[${INK_COLORS.length}];
 uniform mat4 uInvProj;
@@ -341,6 +344,7 @@ void main() {
   vec2 px = 1.0 / uRes;
   vec4 s = texture2D(tScene, vUv);
   float z = texture2D(tDepth, vUv).x;
+  if (uViewOpacity >= 0.0 && z >= 0.999999) discard;
   float d = linDepth(z);
   vec3 vp = viewPosition(vUv, z);
   vec3 ray = normalize(mat3(uInvView) * vp);
@@ -403,7 +407,7 @@ void main() {
   col = mix(col, vec3(1.0, 0.98, 0.87), uFlash);
   float lum = dot(col, vec3(0.3, 0.5, 0.2));
   col = mix(col, vec3(lum) * vec3(0.8, 0.90, 1.0), uSlow * 0.45);
-  gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+  gl_FragColor = vec4(clamp(col, 0.0, 1.0), uViewOpacity >= 0.0 ? uViewOpacity : 1.0);
 }`;
 
 export class InkRenderer {
@@ -425,7 +429,7 @@ export class InkRenderer {
       uniforms: {
         tScene: { value: this.rt.texture }, tDepth: { value: depthTexture }, uRes: { value: new THREE.Vector2(2, 2) }, uAspect: { value: 1 },
         uTime: { value: 0 }, uNear: { value: this.camera.near }, uFar: { value: this.camera.far }, uHurt: { value: 0 }, uFlash: { value: 0 }, uSlow: { value: 0 },
-        uLowHp: { value: 0 }, uLineSpacing: { value: 60 }, uPaper: { value: new THREE.Vector3(0.965, 0.955, 0.905) }, uInks: { value: INK_COLORS },
+        uLowHp: { value: 0 }, uViewOpacity: { value: -1 }, uLineSpacing: { value: 60 }, uPaper: { value: new THREE.Vector3(0.965, 0.955, 0.905) }, uInks: { value: INK_COLORS },
         uInvProj: { value: new THREE.Matrix4() }, uInvView: { value: new THREE.Matrix4() },
         tSurface: { value: fallback }, uMapMood: { value: 0 },
       },
@@ -466,6 +470,7 @@ export class InkRenderer {
     this.renderer.setPixelRatio(this.pixelRatio); this.renderer.setSize(w, h, false);
     const rw = Math.floor(w * this.pixelRatio), rh = Math.floor(h * this.pixelRatio);
     this.rt.setSize(rw, rh);
+    this._viewRt?.setSize(rw, rh);
     this.camera.aspect = w / h; this.camera.updateProjectionMatrix();
     const u = this.post.uniforms; u.uRes.value.set(rw, rh); u.uAspect.value = w / h; u.uLineSpacing.value = rh / 13.5;
   }
@@ -481,5 +486,31 @@ export class InkRenderer {
     u.uInvProj.value.copy(this.camera.projectionMatrixInverse); u.uInvView.value.copy(this.camera.matrixWorld);
     u.uHurt.value = fx.hurt || 0; u.uFlash.value = fx.flash || 0; u.uSlow.value = fx.slow || 0; u.uLowHp.value = fx.lowHp || 0;
     r.render(this.postScene, this.postCam);
+    this._renderViewModel();
+  }
+  _renderViewModel() {
+    const view = this.camera.userData.translucentViewModel;
+    if (!view) return;
+    for (let o = view; o; o = o.parent) if (!o.visible) return;
+    if (!this._viewRt) {
+      const depthTexture = new THREE.DepthTexture(this.rt.width, this.rt.height); depthTexture.type = THREE.FloatType;
+      this._viewRt = new THREE.WebGLRenderTarget(this.rt.width, this.rt.height, { type: THREE.HalfFloatType, minFilter: THREE.NearestFilter, magFilter: THREE.NearestFilter, depthTexture, depthBuffer: true, stencilBuffer: false, generateMipmaps: false });
+      const options = { uniforms: this.post.uniforms, vertexShader: postVert, depthTest: false, depthWrite: false, transparent: true };
+      this._viewClassic = new THREE.ShaderMaterial({ ...options, fragmentShader: postFrag });
+      this._viewToon = new THREE.ShaderMaterial({ ...options, fragmentShader: toonFrag });
+    }
+    // Finish the grenade's ink/toon shading before blending, preserving the world's material IDs,
+    // normals, and depth. Only its first-person meshes use layer 1; shared materials stay opaque.
+    const r = this.renderer, u = this.post.uniforms, layers = this.camera.layers.mask, material = this._postQuad.material;
+    try {
+      this.camera.layers.set(1); r.setRenderTarget(this._viewRt); r.setClearColor(this._clear, 0); r.clear(true, true, false);
+      r.render(this.scene, this.camera); r.setRenderTarget(null);
+      u.tScene.value = this._viewRt.texture; u.tDepth.value = this._viewRt.depthTexture; u.uViewOpacity.value = view.userData.viewOpacity ?? 0.5;
+      this._postQuad.material = this.skin === 'toon' ? this._viewToon : this._viewClassic;
+      r.render(this.postScene, this.postCam);
+    } finally {
+      this.camera.layers.mask = layers; r.setRenderTarget(null); this._postQuad.material = material;
+      u.tScene.value = this.rt.texture; u.tDepth.value = this.rt.depthTexture; u.uViewOpacity.value = -1;
+    }
   }
 }

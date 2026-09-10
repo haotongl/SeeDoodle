@@ -1342,9 +1342,9 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
   // Say out loud what the legs can do this match. A dash that silently does nothing reads as a bug.
   if (!isCoop) setTimeout(() => { if (game.state === 'play') hud.tip(ts('movement') + ': <b>' + ts(mobOf(ctx.mobility()).name) + '</b> · ' + ts(mobOf(ctx.mobility()).blurb), 4); }, 5200);
   // a match started by someone else's click cannot grab the mouse: ask for a click
-  setTimeout(() => { if (game.state === 'play' && !input.pointerLocked && !input.usingGamepad) { game.menu = true; showClickToPlay(); } }, 250);
+  setTimeout(() => { if (game.state === 'play' && !input.pointerLocked && !input.usingGamepad) { player.cancelGrenade(); player.cancelKnife(); game.menu = true; showClickToPlay(); } }, 250);
 }
-function pause() { if ((game.state !== 'play' && !(game.state === 'dying' && online())) || game.menu) return; if (!online()) game.state = 'pause'; game.menu = true; showPause(); audio.reelLoop(false); }
+function pause(at = performance.now()) { if ((game.state !== 'play' && !(game.state === 'dying' && online())) || game.menu) return; player.cancelGrenade(at); player.cancelKnife(); if (!online()) game.state = 'pause'; game.menu = true; showPause(); audio.reelLoop(false); }
 function resume() { if (online()) { game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad && !touchMode) input.requestLock(); return; } begin(); }
 Object.assign(window.__game, { startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, applySkin, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
 hud.onScreenClick = () => {
@@ -1373,6 +1373,8 @@ function tick(now) { requestAnimationFrame(tick); step(now); }
 // match, so a coarse timer runs extra steps (never extra frame chains) while that happens
 setInterval(() => { if (net.active && performance.now() - last > 300) step(performance.now()); }, 250);
 function step(now) {
+  // The background timer can run before an older queued animation frame arrives.
+  if (now <= last) return;
   // never more than 50 ms a step: a bigger jump (a tab coming back) makes the springs in the view model fly apart
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
   // the thumbs are folded in first so Input.update sees them alongside the keyboard and the pad
@@ -1384,7 +1386,7 @@ function step(now) {
   // the config screen eats every key that would otherwise dismiss the screen underneath it
   if (cfgBack) { if (input.pressed('jump') || input.pressed('confirm') || input.pressed('pause')) closeConfig(); }
   else if (st === 'start' || st === 'pause' || st === 'dead' || st === 'over') { if (input.pressed('jump') || input.pressed('confirm') || (st === 'pause' && input.pressed('pause'))) hud.onScreenClick(); }
-  else if ((st === 'play' || (st === 'dying' && online())) && input.pressed('pause')) { if (game.menu) resume(); else { pause(); input.exitLock(); } }
+  else if ((st === 'play' || (st === 'dying' && online())) && input.pressed('pause')) { if (game.menu) resume(); else { pause(input.holdTiming?.('pause')?.start ?? performance.now()); input.exitLock(); } }
   else if ((st === 'play' || st === 'dying') && game.menu && (input.pressed('jump') || input.pressed('confirm'))) resume();
   if (input.pressed('music')) { musicWanted = !musicWanted; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); hud.tip(musicWanted ? 'music on' : 'music off', 1.5); const mc = hud.el.panel.querySelector('#setMus'); if (mc) mc.checked = musicWanted; }
   if (online() && playing) {

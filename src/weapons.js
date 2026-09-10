@@ -417,23 +417,29 @@ export class Rocket extends Gun {
 export class Grenade extends ViewModel {
   constructor(ctx) {
     super(ctx); this.name = 'GRENADES'; this.hint = 'hold LMB / G; full charge pulls pin - release to throw, V cancels'; this.kind = 'grenade'; this.locked = true;
-    this.basePos.set(0.2, -0.2, -0.38); this.aimPos.copy(this.basePos);
+    this.scale = 0.32; this.root.scale.setScalar(this.scale);
+    this.basePos.set(0.24, -0.2, -0.44); this.aimPos.copy(this.basePos);
     const mat = this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }), dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }), orange = makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' });
     sph(0.16, 0, 0, 0, dark, this.root);
     cyl(0.06, 0.1, 0, 0.17, 0, orange, this.root, 'y', 6);
     const pin = this.pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.root.add(pin);
-    hand(mat, 0, -0.1, 0.035, this.root, [0.45, -0.5, 1]);
+    // The smaller hand still needs a forearm that reaches the edge on wide phone viewports.
+    hand(mat, 0, -0.1, 0.035, this.root, [0.45, -0.5, 1], 1.3);
     const g = this.appearanceDetails = new THREE.Group(); this.root.add(g);
     for (const y of [-0.065, 0.04]) { const band = new THREE.Mesh(new THREE.TorusGeometry(Math.sqrt(0.16 * 0.16 - y * y), 0.012, 5, 12), mat); band.rotation.x = Math.PI / 2; band.position.y = y; g.add(band); }
     bx(0.035, 0.2, 0.03, 0.11, 0.15, 0, orange, g).rotation.z = -0.3;
     this.setSkin(this._skin, this._appearanceInk);
+    // Composite this view model after the world; alpha cannot be blended into packed ink data.
+    this.root.traverse((o) => o.layers.set(1)); this.root.userData.viewOpacity = 0.68;
+    this.ctx.camera.userData.translucentViewModel = this.root;
   }
   get spreadPx() { return 4; }
   update() {
     // Player owns the shared grenade input and cooldown, so FIRE and G cannot produce two throws.
-    const state = this.ctx.player?.grenadeStatus, charge = state?.state !== 'idle' ? state?.charge || 0 : 0;
+    const state = this.ctx.player?.grenadeStatus, held = !!state && state.state !== 'idle';
     this.pin.visible = state?.state !== 'armed';
-    this.root.position.y += charge * 0.045; this.root.position.z += charge * 0.06; this.root.rotation.x -= charge * 0.35;
+    this.root.scale.setScalar(held ? 0.23 : this.scale); this.root.userData.viewOpacity = held ? 0.44 : 0.68;
+    if (held) { this.root.position.x += 0.11; this.root.position.y += 0.1; this.root.position.z -= 0.04; this.root.rotation.x -= 0.25; }
   }
 }
 
@@ -446,6 +452,7 @@ export class Katana extends ViewModel {
     this.blockPos = new THREE.Vector3(0.21, -0.31, -0.36); this.blockRot = new THREE.Vector3(1.40, 0.30, 1.24); this.deflectKick = 0;
     this.parrySwing = 0; this.parryDir = 1; this.bloodLevel = 0;
     this.charge = 0; this.charging = false; this.chargeBlocked = false; this.slashCharge = 0;
+    this.chargeStart = null; this.chargeAfter = performance.now();
     this.build(); this.setSkin(this._skin, this._appearanceInk);
   }
   build() {
@@ -484,7 +491,7 @@ export class Katana extends ViewModel {
     }
   }
   get spreadPx() { return 4; }
-  cancelCharge(latch = true) { const held = this.charging || this.ctx.input.down('fire'); this.charging = false; this.charge = 0; if (latch) this.chargeBlocked = held; }
+  cancelCharge(latch = true) { const held = this.charging || this.ctx.input.down('fire'); this.charging = false; this.charge = 0; this.chargeStart = null; this.chargeAfter = performance.now(); if (latch) this.chargeBlocked = held; }
   unequip() { this.cancelCharge(); super.unequip(); }
   startSlash(st, charge = 0) {
     if (!this.allowed) return false;
@@ -505,16 +512,21 @@ export class Katana extends ViewModel {
   update(dt, st) {
     if (!this.allowed) { this.cancelCharge(); this.slashT = 0; this.blocking = false; return; }
     const controlsAvailable = this.ctx.player._grenadeControlsAllowed(), canInput = controlsAvailable && !st.blockFire;
+    const timing = this.ctx.input.holdTiming('fire'), now = performance.now(), fireHeld = timing ? timing.held : st.fire;
     this.cooldown -= dt; this.comboT -= dt; if (this.comboT <= 0) this.combo = 0; this.deflectKick = Math.max(0, this.deflectKick - dt * 6);
     this.parrySwing = Math.max(0, this.parrySwing - dt * 4.5);
     this.updateBlood(dt, st);
     if (!st.fire) this.chargeBlocked = false;
+    if (this.chargeBlocked && timing?.start > this.chargeAfter) this.chargeBlocked = false;
     if (!canInput || st.aim) this.cancelCharge();
     // Quick taps keep their original cut; holding winds up one stronger cut on release.
     if (st.meleePressed && this.slashT <= 0 && this.cooldown <= 0 && controlsAvailable) { this.cancelCharge(); this.startSlash(st); }
     else if (canInput && !st.aim && this.slashT <= 0 && this.cooldown <= 0 && !this.chargeBlocked) {
-      if (st.fire) { this.charging = true; this.charge = Math.min(1, this.charge + dt / 0.8); }
-      else if (this.charging) this.startSlash(st, this.charge);
+      if (st.fire && !this.charging) { this.charging = true; this.chargeStart = Math.max(this.chargeAfter, timing?.start ?? now); }
+      if (this.charging) {
+        this.charge = clamp(((fireHeld ? now : timing?.end ?? now) - this.chargeStart) / 800, 0, 1);
+        if (!fireHeld) this.startSlash(st, this.charge);
+      }
     }
     // guard is up only while the aim trigger is held and you are not swinging
     const wantBlock = controlsAvailable && st.aim && (!st.fire || this.chargeBlocked) && this.slashT <= 0 && this.cooldown <= 0;
