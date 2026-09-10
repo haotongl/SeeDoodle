@@ -266,6 +266,7 @@ function leaveRoom(client, reason) {
   const room = client.room;
   if (!room) return;
   client.room = null;
+  client.grenades.clear();
   room.members.delete(client.id);
   if (room.members.size === 0) { dropRoom(room); return; }
   if (room.hostId === client.id) {
@@ -377,7 +378,7 @@ const ARMS = {
   shotgun: { max: 16 * 1.6, rate: 10 / 0.78, burst: 30, reach: 60, mv: 200 },
   sniper: { max: 150 * 1.5, rate: 5, burst: 3, reach: 300, mv: 450 },
   revolver: { max: 52 * 2.9, rate: 1 / 0.3, burst: 3, reach: 300, mv: 260 },
-  katana: { max: 55, rate: 3, burst: 4, reach: 4.5 },
+  katana: { max: 165, base: 55, rate: 3, burst: 4, reach: 4.5 },
   grenade: { max: 62, rate: 1.25, burst: 8, reach: 6.4 * 0.95 },
 };
 const shots = { ok: 0, rejected: 0, why: {} };
@@ -397,10 +398,11 @@ function rttOf(client) { return client.rtt.length ? Math.min(...client.rtt) : 0;
 function noteMove(client, d, now) {
   if (!Array.isArray(d) || d.length < 8) return;
   const [x, y, z] = d;
-  if (!(typeof x === 'number' && typeof y === 'number' && typeof z === 'number')) return;
+  if (![x, y, z].every(Number.isFinite)) return;
   const h = client.hist;
   h.push({ t: now, x, y, z, alive: !!(d[6] & 64) });
   while (h.length > 2 && now - h[0].t > HIST_MS) h.shift();
+  for (const g of client.grenades.values()) if (g.phase === 'armed' && now <= g.expiresAt + 200) g.held = [x, y + 0.9, z];
 }
 // Where this player was on the server's clock at time t, interpolated between the two samples
 // either side of it - the feed is only 20Hz, so landing between packets is the normal case.
@@ -452,6 +454,53 @@ function pointSegDist2(p, a, b) {
 }
 const vec3 = (v) => (Array.isArray(v) && v.length >= 3 && v.every((n) => typeof n === 'number' && Number.isFinite(n)) ? [v[0], v[1], v[2]] : null);
 
+// Grenades outlive their thrower's current position and even their life. Remember only the launch
+// envelope and fuse, not a second physics simulation: bounces remain the owning client's job.
+const GRENADE_FUSE_MS = 7000, GRENADE_GRACE_MS = 5000, GRENADE_LIMIT = 32;
+const grenadeId = (id) => typeof id === 'string' && /^[A-Za-z0-9_.:-]{1,96}$/.test(id);
+function pruneGrenades(client, now) {
+  for (const [id, g] of client.grenades) if (now > g.expiresAt + GRENADE_GRACE_MS) client.grenades.delete(id);
+}
+function noteGrenade(client, d, now) {
+  if (!d || !grenadeId(d.id) || !['armed', 'thrown'].includes(d.phase) || !Number.isFinite(d.expiresAt)) return deny('malformed grenade');
+  const pos = vec3(d.pos), vel = vec3(d.vel);
+  if (!pos || !vel || d.pos.length !== 3 || d.vel.length !== 3 || pos.some((n) => Math.abs(n) > 10000) || len3(vel) > 80) return deny('malformed grenade');
+  if (d.thrownAt != null && (!Number.isFinite(d.thrownAt) || d.thrownAt < d.expiresAt - GRENADE_FUSE_MS - 750 || d.thrownAt > now + 750)) return deny('grenade throw time out of range');
+  pruneGrenades(client, now);
+  let g = client.grenades.get(d.id);
+  if (g) {
+    if (Math.abs(d.expiresAt - g.wireExpires) > 1) return deny('grenade fuse changed');
+    if (g.phase === 'thrown' || d.phase === 'armed') return false;
+    // A held grenade can move with its owner. Keep that position separately so a late death/drop
+    // packet is not compared with the owner's already respawned location.
+    const self = whereAt(client, now), at = self && [self.x, self.y + 0.9, self.z];
+    if (len3(sub(pos, g.held)) > ORIGIN_SLACK && (!at || len3(sub(pos, at)) > ORIGIN_SLACK)) return deny('grenade did not start at the holder');
+  } else {
+    const slack = Math.min(1500, rttOf(client) + 750);
+    if (d.expiresAt > now + GRENADE_FUSE_MS + slack || d.expiresAt < now - slack) return deny('grenade fuse out of range');
+    if (d.phase === 'armed' && d.expiresAt < now + GRENADE_FUSE_MS - slack) return deny('grenade armed too late');
+    const self = whereAt(client, now);
+    if (!self || len3(sub(pos, [self.x, self.y + 0.9, self.z])) > ORIGIN_SLACK) return deny('grenade did not start at the holder');
+    if (client.grenades.size >= GRENADE_LIMIT || !withinFireRate(client, 'grenade', now)) return deny('too many grenades');
+    g = { phase: d.phase, wireExpires: d.expiresAt, expiresAt: Math.min(d.expiresAt, now + GRENADE_FUSE_MS), held: pos, victims: new Set() };
+    client.grenades.set(d.id, g);
+  }
+  g.phase = d.phase;
+  if (d.phase === 'thrown') {
+    g.pos = pos; g.vel = vel;
+    const launched = d.thrownAt ?? now - Math.min(MAX_REWIND_MS, rttOf(client) / 2);
+    g.thrownAt = Math.min(now, g.expiresAt, launched);
+  }
+  return { id: d.id, phase: d.phase, pos, vel, expiresAt: g.expiresAt, charged: true };
+}
+function grenadeCanReach(g, at) {
+  if (g.phase === 'armed') return len3(sub(at, g.held)) <= ORIGIN_SLACK;
+  const flight = Math.max(0, (g.expiresAt - g.thrownAt) / 1000), delta = sub(at, g.pos);
+  const horizontal = Math.hypot(g.vel[0], g.vel[2]) * flight + ORIGIN_SLACK;
+  const vertical = Math.abs(g.vel[1]) * flight + 11 * flight * flight + ORIGIN_SLACK;
+  return Math.hypot(delta[0], delta[2]) <= horizontal && Math.abs(delta[1]) <= vertical;
+}
+
 // A token bucket per weapon: enough to cover a burst, refilling at the rate the gun can actually
 // fire. Stops a client claiming a hundred sniper hits in a second without punishing a shotgun for
 // reporting ten pellets at once.
@@ -471,9 +520,23 @@ function resolveHit(client, m) {
   const arm = ARMS[m.k];
   if (!arm) return deny('unknown weapon');
   const dmg = Number(m.dmg);
-  if (!(dmg > 0) || dmg > arm.max + 1) return deny('damage out of range');
+  let damageCap = arm.max + 1;
+  if (m.k === 'katana') {
+    const charge = m.charge === undefined ? 0 : m.charge;
+    if (!Number.isFinite(charge) || charge < 0 || charge > 1) return deny('invalid slash charge');
+    damageCap = Math.round(arm.base * (1 + 2 * charge));
+  }
+  if (!(dmg > 0) || dmg > damageCap) return deny('damage out of range');
   const now = Date.now();
-  if (!withinFireRate(client, m.k, now)) return deny('firing too fast');
+  const recordedGrenade = m.k === 'grenade' && m.gid != null;
+  let grenade = null;
+  if (recordedGrenade) {
+    pruneGrenades(client, now);
+    grenade = grenadeId(m.gid) && client.grenades.get(m.gid);
+    if (!grenade) return deny('unknown grenade');
+    if (now < grenade.expiresAt - Math.min(MAX_REWIND_MS, rttOf(client) + 100)) return deny('grenade has not exploded');
+    if (grenade.victims.has(victim.id)) return deny('duplicate grenade hit');
+  } else if (!withinFireRate(client, m.k, now)) return deny('firing too fast');
 
   // Wind the target back to the shooter's screen. Their own round trip sets how far, capped so a
   // player who lets their connection rot cannot reach ever further into the past.
@@ -499,7 +562,12 @@ function resolveHit(client, m) {
     if (!at) return deny('malformed claim');
     const c = [target[0], target[1] + 0.9, target[2]];
     if (len3(sub(at, c)) > arm.reach + HULL_R) return deny('outside the blast');
-    if (selfNow && len3(sub(at, [selfNow.x, selfNow.y, selfNow.z])) > 45) return deny('blast nowhere near the thrower');
+    if (grenade) {
+      if (!grenadeCanReach(grenade, at)) return deny('blast outside grenade flight');
+      if (grenade.blast && len3(sub(at, grenade.blast)) > 1) return deny('grenade blast moved');
+      grenade.blast = at;
+      grenade.victims.add(victim.id);
+    } else if (selfNow && len3(sub(at, [selfNow.x, selfNow.y, selfNow.z])) > 45) return deny('blast nowhere near the thrower');
   } else if (m.k === 'katana') {
     if (!selfNow) return deny('shooter never reported a position');
     const gap = len3(sub([selfNow.x, selfNow.y + 0.9, selfNow.z], [target[0], target[1] + 0.9, target[2]]));
@@ -529,7 +597,7 @@ function resolveHit(client, m) {
   }
 
   shots.ok++;
-  const from = selfNow ? [+selfNow.x.toFixed(1), +(selfNow.y + 0.9).toFixed(1), +selfNow.z.toFixed(1)] : null;
+  const from = grenade ? vec3(m.at) : selfNow ? [+selfNow.x.toFixed(1), +(selfNow.y + 0.9).toFixed(1), +selfNow.z.toFixed(1)] : null;
   send(victim, { t: 'm', tt: 'pdmg', from: client.id, d: { amount: Math.round(dmg), from, by: client.id, crit: !!m.crit, src: m.k } });
   return true;
 }
@@ -543,7 +611,7 @@ function onMessage(client, raw) {
   switch (m.t) {
     case 'hello':
       client.name = String(m.name || '').slice(0, 14);
-      send(client, { t: 'hello', id: client.id, max: MAX_PLAYERS });
+      send(client, { t: 'hello', id: client.id, max: MAX_PLAYERS, now: Date.now() });
       break;
 
     case 'name':
@@ -655,6 +723,15 @@ function onMessage(client, raw) {
     // game payload: the server does the routing the host used to do by hand
     case 'm': {
       if (!room) break;
+      if (m.tt === 'nade' && m.d && m.d.charged === true) {
+        const grenade = noteGrenade(client, m.d, Date.now());
+        if (!grenade) break;
+        m.d = grenade;
+      }
+      // Targeted late-join starts are snapshots of the current round, not a new round.
+      if (m.tt === 'start' && client.id === room.hostId && !m.to && !(m.d && m.d.late)) {
+        for (const member of room.members.values()) member.grenades.clear();
+      }
       // Damage is no longer something one player may simply announce to another. It arrives as a
       // claim and leaves as `pdmg` only if it survives resolveHit. The exception is the host, which
       // simulates the enemies in co-op and so is the only one that can say a bot hurt you - it is
@@ -675,7 +752,7 @@ function onMessage(client, raw) {
     }
 
     case 'ping':
-      send(client, { t: 'pong', d: m.d });
+      send(client, { t: 'pong', d: m.d, now: Date.now() });
       break;
 
     // the answer to our own ping, which is how the rewind depth is measured
@@ -717,11 +794,11 @@ server.on('upgrade', (req, socket) => {
   if (!ws) return;
   const client = {
     id: newId(), ws, name: '', room: null, meta: {}, seen: Date.now(), hist: [], rtt: [], buckets: {},
-    token: crypto.randomBytes(12).toString('base64url'), gone: 0, graceT: null,
+    token: crypto.randomBytes(12).toString('base64url'), gone: 0, graceT: null, grenades: new Map(),
   };
   clients.set(client.id, client);
   bind(ws, client);
-  send(client, { t: 'hello', id: client.id, token: client.token, max: MAX_PLAYERS });
+  send(client, { t: 'hello', id: client.id, token: client.token, max: MAX_PLAYERS, now: Date.now() });
 });
 
 // Closing a laptop lid or dropping off the wifi sends no FIN, so TCP alone would hold that player's
@@ -738,6 +815,7 @@ const WEDGE_MS = 6000;
 setInterval(() => {
   const now = Date.now();
   for (const c of clients.values()) {
+    pruneGrenades(c, now);
     if (c.gone) continue;   // no socket to close; the grace timer is already counting
     const quiet = now - c.seen;
     if (quiet > SILENT_MS || (quiet > WEDGE_MS && c.ws.pending > WEDGE_BYTES)) c.ws.close();

@@ -43,13 +43,15 @@ export class Player {
     this.deathT = 0; this.gravityScale = 1; this.dashLock = false; this.mob = MOB_FULL;
     this.recoilAcc = { p: 0, y: 0 }; this.recoilRecT = 0; this.sprintFireLock = 0;
     this.isLocal = true; this.team = 0; this.name = 'you'; this.grenades = 3; this.maxGrenades = 5; this.nades = []; this.nadeCd = 0; this.firing = false; this.onThrow = null;
+    this._heldNade = null; this._nadeBlocked = false; this._nadeSeq = 0; this._nadeSeen = new Map();
     const rm = makeInkMaterial({ ink: INK.BLUE, fill: false, shadeBias: -0.3 });
     this.rope = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 6), rm); this.rope.visible = false; ctx.scene.add(this.rope);
     const hm = makeInkMaterial({ ink: INK.BLUE }); this.hookMesh = new THREE.Group();
     this.hookMesh.add(new THREE.Mesh(new THREE.TorusGeometry(0.16, 0.05, 6, 10), hm)); const hb = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.3, 0.08), hm); hb.position.y = -0.2; this.hookMesh.add(hb);
     this.hookMesh.visible = false; ctx.scene.add(this.hookMesh);
   }
-  reset(pos) {
+  reset(pos, keepGrenades = false) {
+    this.cancelGrenade(); this.cancelKnife();
     this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1); this.grapStam = 1; this.blockHeld = 0;
     const b = this.body; b.pos.copy(pos); b.vel.set(0, 0, 0); b.onGround = false; b.height = STAND_H;
     this.recoilAcc.p = 0; this.recoilAcc.y = 0; this.recoilRecT = 0; this.sprintFireLock = 0;
@@ -58,9 +60,9 @@ export class Player {
     for (const w of this.weapons) if (w.isGun) { w.mag = w.magSize; w.reserve = w.startReserve; w.reloading = false; w.pumpT = 0; w.relock(); }
     this.returnT = 0; this.nadeCd = 0; this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1); this._aiming = false; this.firing = false;
     const blade = this.weapons[this.katanaIndex]; blade.slashT = 0; blade.blocking = false; blade.blockAmt = 0; blade.cooldown = 0;
-    this.switchTo(this.weapons.findIndex((w, i) => !w.locked && this.weaponAllowed(i)), true); this.rig.visible = true; this.eyeH = EYE_STAND; this.grenades = this.grenadesAllowed ? 3 : 0; this.clearNades();
+    this.switchTo(this.weapons.findIndex((w, i) => !w.locked && this.weaponAllowed(i)), true); this.rig.visible = true; this.eyeH = EYE_STAND; this.grenades = this.grenadesAllowed ? 3 : 0; if (!keepGrenades) this.clearNades();
   }
-  clearNades() { for (const n of this.nades) this.ctx.scene.remove(n.mesh); this.nades.length = 0; }
+  clearNades() { for (const n of this.nades) this.ctx.scene.remove(n.mesh); this.nades.length = 0; this._nadeSeen.clear(); this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; if (this._arc) this.updateNadeArc(-1); }
   get isBlocking() { return this.weapon.kind === 'katana' && this.weapon.blocking; }
   aimDir(spread = 0) { const d = this.aimFwd.clone(); if (spread > 0) { d.addScaledVector(this.aimRight, rand(-spread, spread)); d.y += rand(-spread, spread); d.normalize(); } return d; }
   // Recoil moves the aim for real - the spring is only the flourish on top - and until now that
@@ -103,6 +105,7 @@ export class Player {
   }
   switchTo(i, silent = false) {
     if (!Number.isInteger(i) || !this.weaponAllowed(i) || this.weapons[i].locked) return; if (i === this.weaponIndex && !silent) return;
+    if (this._nadeHeld) this.cancelGrenade();
     if (this.weapon.kind !== 'katana') this.prevWeaponIndex = this.weaponIndex;
     this.weapon.unequip(); this.weaponIndex = i; this.weapon = this.weapons[i]; this.weapon.equip(); if (!silent) audio.switchWeapon();
     this.ctx.hud.setWeapon(this.weapon.name, this.weapon.hint); this.ctx.hud.setCrosshairMode(this.weapon.kind === 'katana' ? 'katana' : '');
@@ -117,6 +120,7 @@ export class Player {
   get infiniteGrenades() { return this.weaponRules.infiniteGrenades; }
   applyWeaponMode(key) {
     const next = weaponModeOf(key); if (next === this.weaponRules) return;
+    this.cancelGrenade(); this.cancelKnife();
     const previous = this.weaponRules; this.weaponRules = next;
     this.weapons[this.grenadeIndex].locked = !this.weaponAllowed('grenade');
     // A room rule change must cancel a charged throw, queued quick slash and scoped pose too.
@@ -184,7 +188,7 @@ export class Player {
     this.ctx.effects.sparks(_v2.copy(this.eye).addScaledVector(this.forward, 0.8), this.forward.clone().negate(), INK.ORANGE, 12, 8);
     this.ctx.game.addScore(40, 'BLOCKED'); this.ctx.input.rumble(0.6, 0.6, 100); return true;
   }
-  die() { this.alive = false; this.deathT = 0; audio.death(); this.detachGrapple(false); this.ctx.game.onPlayerDeath(); }
+  die() { this.cancelGrenade(); this.cancelKnife(); this.alive = false; this.deathT = 0; audio.death(); this.detachGrapple(false); this.ctx.game.onPlayerDeath(); }
   idleCam(t) {
     const c = this.camera; c.position.set(Math.sin(t * 0.08) * 70, 30 + Math.sin(t * 0.23) * 4, Math.cos(t * 0.08) * 70); c.lookAt(0, 10, 0); this.rig.visible = false;
     this.eye.copy(c.position); this.center.copy(c.position); c.getWorldDirection(this.forward); this.right.set(this.forward.z, 0, -this.forward.x).normalize();
@@ -199,7 +203,7 @@ export class Player {
       this.deathT += dt; this.eyeH = damp(this.eyeH, 0.35, 3, dt); this.roll = damp(this.roll, 0.9, 3, dt); this.pitch = damp(this.pitch, -0.35, 3, dt);
       b.vel.x = damp(b.vel.x, 0, 4, dt); b.vel.z = damp(b.vel.z, 0, 4, dt); b.vel.y -= G * dt; ctx.world.moveBody(b, dt);
       this.forward.set(-Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), -Math.cos(this.yaw) * Math.cos(this.pitch)); this.right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw));
-      this.updateNades(dt); this._updateCamera(dt); this.weapon.animate(dt, this._weaponState(false, false, 0)); return;
+      this._updateCamera(dt); this.weapon.animate(dt, this._weaponState(false, false, 0)); return;
     }
     this.rig.visible = true;
     // ---- look ----
@@ -334,40 +338,105 @@ export class Player {
     this._updateCamera(dt);
     // ---- grenades ----
     this.nadeCd -= dt;
-    const grenadeHeld = inp.down('grenade') || (this.weapon.kind === 'grenade' && inp.down('fire'));
-    const canThrow = this.grenadesAllowed && (this.infiniteGrenades || this.grenades > 0) && this.nadeCd <= 0;
-    if (grenadeHeld && canThrow && !this.dashLock) { this.nadeCharge = Math.min(1, this.nadeCharge + dt / 1.1); this._nadeHeld = true; }
-    else if (this._nadeHeld) { this._nadeHeld = false; if (!grenadeHeld && canThrow) this.throwGrenade(null, this.nadeCharge); this.nadeCharge = 0; }
-    this.updateNadeArc(this._nadeHeld ? this.nadeCharge : -1);
-    this.updateNades(dt);
+    this._updateGrenadeInput(dt);
     // ---- weapons ----
     for (let i = 0; i < 5; i++) if (inp.pressed('slot' + (i + 1))) this.switchTo(Math.min(i, this.weapons.length - 1));
     // the wheel steps over anything still locked rather than stopping dead on it
     if (inp.pressed('nextWeapon')) this.cycleWeapon(1);
     if (inp.pressed('prevWeapon')) this.cycleWeapon(-1);
     const st = this._weaponState(sprinting, aiming, hs2);
-    if (inp.pressed('melee') && this.weapon.kind !== 'katana' && this.weaponAllowed(this.katanaIndex)) { this.switchTo(this.katanaIndex); this.returnT = 0.85; this.weapons[this.katanaIndex].startSlash(st); st.meleePressed = false; }
+    if (inp.pressed('melee') && this.weapon.kind !== 'katana' && this.weaponAllowed(this.katanaIndex) && this._grenadeControlsAllowed()) { this.switchTo(this.katanaIndex); this.returnT = 0.85; this.weapons[this.katanaIndex].startSlash(st); st.meleePressed = false; }
     if (this.returnT > 0) { if (this.weapon.kind === 'katana' && (st.firePressed || st.aim || st.meleePressed)) this.returnT = 0; else { this.returnT -= dt; if (this.returnT <= 0) this.switchTo(this.prevWeaponIndex); } }
     this.firing = st.fire && this.weapon.isGun;
     this.weapon.animate(dt, st);
     ctx.hud.setAds(this.weapon.isGun && this.weapon.aimAmt > 0.55);
     ctx.hud.setScope(!!this.weapon.scope && this.weapon.aimAmt > 0.62);
   }
-  // ---- grenades: a lobbed ink bomb with a short fuse and a big orange blast ----
-  // where a throw starts and how fast it leaves, for a given charge (0 = flick, 1 = full wind-up)
+  get knifeStatus() { const knife = this.weapons[this.katanaIndex]; return { state: this.weapon === knife && knife.charging ? 'charging' : 'idle', charge: knife.charge, multiplier: 1 + 2 * (knife.charge <= 0.1 ? 0 : knife.charge) }; }
+  cancelKnife() { this.weapons[this.katanaIndex].cancelCharge(); }
+  get grenadeStatus() {
+    return { state: this._heldNade ? 'armed' : this._nadeHeld ? 'safe' : 'idle', charge: this.nadeCharge,
+      remaining: this._heldNade ? Math.max(0, (this._heldNade.expiresAt - this._grenadeNow()) / 1000) : null };
+  }
+  _grenadeNow() { return this.ctx.grenadeNow ? this.ctx.grenadeNow() : Date.now(); }
+  _grenadeOwner() { return this.ctx.localPlayerId?.() || 'local'; }
+  _grenadeHand(pos) { return pos.copy(this.eye).addScaledVector(this.right, 0.25).addScaledVector(this.forward, 0.6).add(_v.set(0, -0.15, 0)); }
+  _grenadeControlsAllowed() {
+    const inp = this.ctx.input, game = this.ctx.game;
+    return this.alive && !this.dashLock && !game.menu && game.state === 'play' && (inp.pointerLocked || inp.usingTouch || inp.usingGamepad);
+  }
+  _updateGrenadeInput(dt) {
+    const inp = this.ctx.input, charged = this.weaponRules.key === 'grenades';
+    const held = inp.down('grenade') || (this.weapon.kind === 'grenade' && inp.down('fire'));
+    // A cancelled hold cannot become a fresh throw until every initiating control is released.
+    if (this._nadeBlocked) { if (!inp.down('grenade') && !inp.down('fire')) this._nadeBlocked = false; else return; }
+    if (!this._grenadeControlsAllowed()) { if (this._nadeHeld) this.cancelGrenade(); return; }
+    const canThrow = this.grenadesAllowed && (this.infiniteGrenades || this.grenades > 0) && this.nadeCd <= 0;
+    if (held && canThrow) { this._nadeHeld = true; this.nadeCharge = Math.min(1, this.nadeCharge + dt / 1.1); }
+    if (charged && this._nadeHeld) {
+      if (inp.pressed('nadeCancel') || inp.pressed('aim') || inp.pressed('melee')) { this.cancelGrenade(); return; }
+      if (this.nadeCharge >= 1 - 1e-9) { this.nadeCharge = 1; this._primeGrenade(); }
+    }
+    if (this._nadeHeld && !held) {
+      if (canThrow) this.throwGrenade(null, this.nadeCharge); else this.cancelGrenade();
+      this._nadeHeld = false; this.nadeCharge = 0;
+    }
+    this.updateNadeArc(this._nadeHeld ? this.nadeCharge : -1);
+  }
+  cancelGrenade() {
+    if (this._heldNade) this._releaseGrenade(true);
+    this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeBlocked = true;
+    if (this._arc) this.updateNadeArc(-1);
+  }
+  _primeGrenade(announce = true) {
+    if (this._heldNade) return this._heldNade;
+    if (!this._nadeHeld || !this.alive || this.weaponRules.key !== 'grenades') return null;
+    const owner = this._grenadeOwner(), now = this._grenadeNow();
+    const id = now.toString(36) + '-' + (++this._nadeSeq).toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+    const n = this._makeNade(this._grenadeHand(new THREE.Vector3()), new THREE.Vector3(), true);
+    Object.assign(n, { id, owner, charged: true, phase: 'armed', expiresAt: now + 7000, lastSimAt: now });
+    n.mesh.visible = false; n.mesh.children[1].visible = false; this._heldNade = n;
+    if (!this.infiniteGrenades) this.grenades--;
+    if (announce && this.onThrow) this.onThrow(this._grenadePacket(n));
+    audio.shell(); this.ctx.input.rumble(0.15, 0.25, 45);
+    return n;
+  }
+  _grenadePacket(n) { return { id: n.id, phase: n.phase, pos: n.pos.toArray(), vel: n.vel.toArray(), expiresAt: n.expiresAt, charged: true }; }
+  _releaseGrenade(drop = false, charge = this.nadeCharge) {
+    const n = this._heldNade || this._primeGrenade(false); if (!n) return false;
+    this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0;
+    n.phase = 'thrown'; n.rest = false; n.mesh.visible = true; n.lastSimAt = this._grenadeNow();
+    if (drop) { n.pos.copy(this.body.pos).addScaledVector(this.forward, 0.35); n.pos.y = this.body.pos.y + 0.35; n.vel.copy(this.body.vel).multiplyScalar(0.35); }
+    else this._nadeLaunch(charge, n.pos, n.vel);
+    n.mesh.position.copy(n.pos); this.nadeCd = 0.55;
+    if (this.onThrow) this.onThrow(this._grenadePacket(n));
+    if (!drop) this._grenadeThrowFeedback();
+    if (this._arc) this.updateNadeArc(-1);
+    return true;
+  }
+  // Only the horizontal component gains range; scaling vertical speed too would overshoot 1.5x.
   _nadeLaunch(charge, pos, vel) {
-    pos.copy(this.eye).addScaledVector(this.right, 0.25).addScaledVector(this.forward, 0.6); pos.y -= 0.15;
-    vel.copy(this.forward).multiplyScalar(9 + 20 * charge).addScaledVector(this.body.vel, 0.5); vel.y += 3.5 + 2.5 * charge;
+    this._grenadeHand(pos); vel.copy(this.forward).multiplyScalar(9 + 20 * charge);
+    if (this.weaponRules.key === 'grenades') { const gain = 1 + 0.5 * charge; vel.x *= gain; vel.z *= gain; }
+    vel.addScaledVector(this.body.vel, 0.5); vel.y += 3.5 + 2.5 * charge;
+  }
+  _grenadeThrowFeedback() {
+    this.weapon.recoil.kick(-0.4, 0.5, 1.2); this.weapon.recoilRot.kick(-3, 0, -1.5); audio.grappleFire(); this.ctx.input.rumble(0.2, 0.4, 50);
   }
   throwGrenade(remote = null, charge = 0) {
     if (!this.grenadesAllowed || (!remote && (!this.alive || this.dashLock || this.nadeCd > 0 || (!this.infiniteGrenades && this.grenades <= 0)))) return false;
-    const ctx = this.ctx; let pos, vel;
-    if (remote) { pos = new THREE.Vector3().fromArray(remote.pos); vel = new THREE.Vector3().fromArray(remote.vel); }
+    if (!remote && this.weaponRules.key === 'grenades') { this._nadeHeld = true; return this._releaseGrenade(false, clamp(charge, 0, 1)); }
+    let pos, vel;
+    if (remote) { if (!validNadeVector(remote.pos, 10000) || !validNadeVector(remote.vel, 150)) return false; pos = new THREE.Vector3().fromArray(remote.pos); vel = new THREE.Vector3().fromArray(remote.vel); }
     else {
       if (!this.infiniteGrenades) this.grenades--; this.nadeCd = 0.55; pos = new THREE.Vector3(); vel = new THREE.Vector3(); this._nadeLaunch(clamp(charge, 0, 1), pos, vel);
-      this.weapon.recoil.kick(-0.4, 0.5, 1.2); this.weapon.recoilRot.kick(-3, 0, -1.5); audio.grappleFire(); ctx.input.rumble(0.2, 0.4, 50);
+      this._grenadeThrowFeedback();
       if (this.onThrow) this.onThrow({ pos: pos.toArray().map((v) => +v.toFixed(2)), vel: vel.toArray().map((v) => +v.toFixed(2)) });
     }
+    this._makeNade(pos, vel, !remote);
+    return true;
+  }
+  _makeNade(pos, vel, mine) {
     // Infinite supplies must not allocate a fresh set of GPU resources for every throw.
     const visual = this._nadeVisual || (this._nadeVisual = {
       body: new THREE.SphereGeometry(0.16, 8, 6), pin: new THREE.TorusGeometry(0.07, 0.02, 4, 8), cap: new THREE.CylinderGeometry(0.06, 0.06, 0.1, 6),
@@ -377,10 +446,34 @@ export class Player {
     g.add(new THREE.Mesh(visual.body, visual.black));
     const pin = new THREE.Mesh(visual.pin, visual.orange); pin.position.y = 0.2; g.add(pin);
     const cap = new THREE.Mesh(visual.cap, visual.orange); cap.position.y = 0.17; g.add(cap);
-    g.position.copy(pos); ctx.scene.add(g);
-    this.nades.push({ mesh: g, pos, vel, ang: new THREE.Vector3(rand(-6, 6), rand(-6, 6), rand(-6, 6)), fuse: 1.7, mine: !remote, rest: false, tick: 0 });
+    g.position.copy(pos); this.ctx.scene.add(g);
+    const n = { mesh: g, pos, vel, ang: new THREE.Vector3(rand(-6, 6), rand(-6, 6), rand(-6, 6)), fuse: 1.7, mine, rest: false, tick: 0 };
+    this.nades.push(n); return n;
+  }
+  receiveGrenade(data, from, snapshot = false) {
+    if (!data || typeof data !== 'object') return false;
+    if (!data.charged) return this.throwGrenade(data);
+    const now = this._grenadeNow();
+    if (typeof from !== 'string' || !from || from.length > 128 || typeof data.id !== 'string' || !data.id || data.id.length > 96 ||
+      !['armed', 'thrown'].includes(data.phase) || !validNadeVector(data.pos, 10000) || !validNadeVector(data.vel, 150) || !Number.isFinite(data.expiresAt)) return false;
+    const key = from + '\0' + data.id;
+    if (this._nadeSeen.has(key)) return false;
+    let n = this.nades.find((v) => v.charged && v.id === data.id && v.owner === from);
+    if (!n && (data.expiresAt < now - 1500 || data.expiresAt > now + 7500 || this.nades.length >= 256)) return false;
+    if (n) {
+      n.expiresAt = Math.min(n.expiresAt, data.expiresAt);
+      // A trusted catch-up snapshot corrects flight, but an old armed event cannot put it back in a hand.
+      if ((n.phase === 'thrown' && !n.orphaned && !snapshot) || data.phase === 'armed') return true;
+      n.phase = 'thrown'; n.orphaned = false; n.pos.fromArray(data.pos); n.vel.fromArray(data.vel); n.rest = false; n.mesh.visible = true; n.mesh.position.copy(n.pos); n.lastSimAt = now;
+      return true;
+    }
+    n = this._makeNade(new THREE.Vector3().fromArray(data.pos), new THREE.Vector3().fromArray(data.vel), from === this._grenadeOwner());
+    Object.assign(n, { id: data.id, owner: from, charged: true, phase: data.phase, expiresAt: data.expiresAt, lastSimAt: now });
+    n.mesh.children[1].visible = false;
     return true;
   }
+  grenadeSnapshot() { return this.nades.filter((n) => n.charged && n.expiresAt > this._grenadeNow()).map((n) => ({ ...this._grenadePacket(n), owner: n.owner })); }
+  syncGrenades(rows) { if (Array.isArray(rows)) for (const row of rows.slice(0, 256)) if (row && row.charged) this.receiveGrenade(row, row.owner, true); }
   updateNadeArc(charge) {
     if (!this._arc) {
       const dots = []; const mat = makeInkMaterial({ ink: INK.BLACK, fill: true });
@@ -390,37 +483,67 @@ export class Player {
     }
     const A = this._arc;
     if (charge < 0) { if (A.shown) { for (const d of A.dots) d.visible = false; A.mark.visible = false; A.shown = false; } return; }
-    A.shown = true; const world = this.ctx.world; this._nadeLaunch(charge, _ap, _av); let n = 0; const step = 1 / 30;
-    for (let i = 0; i < 52 && n < A.dots.length; i++) {
-      _av.y -= 22 * step; _aprev.copy(_ap); _ap.addScaledVector(_av, step); _ad.subVectors(_ap, _aprev); const len = _ad.length();
-      if (len > 1e-6) { _ad.divideScalar(len); const hit = world.raycast(_aprev, _ad, len + 0.16); if (hit) { _ap.copy(hit.point).addScaledVector(hit.normal, 0.16); const vn = _av.dot(hit.normal); if (vn < 0) { _av.addScaledVector(hit.normal, -1.45 * vn); _av.multiplyScalar(0.55); } if (_av.length() < 1.2 && hit.normal.y > 0.5) break; } }
-      if (i % 2 === 0 && i >= 6) { const d = A.dots[n++]; d.position.copy(_ap); d.visible = true; const k = 0.8 + charge * 0.6; d.scale.setScalar(k); }
+    A.shown = true; const world = this.ctx.world; this._nadeLaunch(charge, _ap, _av); let n = 0, elapsed = 0, resting = false; const step = 1 / 30;
+    const duration = this.weaponRules.key === 'grenades' ? (this.grenadeStatus.remaining ?? 7) : 1.7;
+    const steps = Math.ceil(duration / step), spacing = Math.max(1, Math.ceil(steps / A.dots.length));
+    for (let i = 0; i < steps; i++) {
+      const h = Math.min(step, duration - elapsed); elapsed += h;
+      _av.y -= 22 * h; _aprev.copy(_ap); _ap.addScaledVector(_av, h); _ad.subVectors(_ap, _aprev); const len = _ad.length();
+      if (len > 1e-6) { _ad.divideScalar(len); const hit = world.raycast(_aprev, _ad, len + 0.16); if (hit) { _ap.copy(hit.point).addScaledVector(hit.normal, 0.16); const vn = _av.dot(hit.normal); if (vn < 0) { _av.addScaledVector(hit.normal, -1.45 * vn); _av.multiplyScalar(0.55); } if (_av.length() < 1.2 && hit.normal.y > 0.5) { resting = true; break; } } }
+      if (i % spacing === 0 && n < A.dots.length) { const d = A.dots[n++]; d.position.copy(_ap); d.visible = true; const k = 0.8 + charge * 0.6; d.scale.setScalar(k); }
     }
     for (let i = n; i < A.dots.length; i++) A.dots[i].visible = false;
     A.mark.position.copy(_ap); A.mark.position.y += 0.02; A.mark.visible = true; A.mark.scale.setScalar(0.8 + charge * 0.5);
+    if (resting) A.mark.rotation.set(Math.PI / 2, 0, 0); else A.mark.quaternion.copy(this.camera.quaternion);
   }
-  updateNades(dt) {
-    const ctx = this.ctx, world = ctx.world;
+  tickGrenades(dt) {
+    if (this._nadeHeld && !this._grenadeControlsAllowed()) this.cancelGrenade();
+    if (this.weapons[this.katanaIndex].charging && !this._grenadeControlsAllowed()) this.cancelKnife();
+    const ctx = this.ctx, now = this._grenadeNow();
+    for (const [key, expires] of this._nadeSeen) if (expires < now) this._nadeSeen.delete(key);
     for (let i = this.nades.length - 1; i >= 0; i--) {
-      const n = this.nades[i]; n.fuse -= dt; n.tick += dt;
-      if (!n.rest) {
-        n.vel.y -= 22 * dt; _v2.copy(n.pos); n.pos.addScaledVector(n.vel, dt);
-        _d.subVectors(n.pos, _v2); const len = _d.length();
-        if (len > 1e-6) {
-          _d.divideScalar(len); const hit = world.raycast(_v2, _d, len + 0.16);
-          if (hit) {
-            n.pos.copy(hit.point).addScaledVector(hit.normal, 0.16);
-            const vn = n.vel.dot(hit.normal); if (vn < 0) { n.vel.addScaledVector(hit.normal, -1.45 * vn); n.vel.multiplyScalar(0.55); n.ang.multiplyScalar(0.6); audio.shell(); }
-            if (n.vel.length() < 1.2 && hit.normal.y > 0.5) { n.rest = true; n.vel.set(0, 0, 0); }
-          }
-        }
-        n.mesh.rotation.x += n.ang.x * dt; n.mesh.rotation.y += n.ang.y * dt; n.mesh.rotation.z += n.ang.z * dt;
+      const n = this.nades[i]; if (!n.charged && !['play', 'dying'].includes(ctx.game.state)) continue;
+      const until = n.charged ? Math.min(now, n.expiresAt) : now;
+      const elapsed = n.charged ? Math.max(0, (until - (n.lastSimAt ?? until)) / 1000) : dt;
+      if (n.charged) n.lastSimAt = Math.max(n.lastSimAt ?? until, until);
+      n.fuse = n.charged ? (n.expiresAt - now) / 1000 : n.fuse - dt; n.tick += elapsed;
+      if (n.phase === 'armed') {
+        const hand = n === this._heldNade ? this._grenadeHand(_v3) : ctx.grenadeOwnerPos?.(n.owner);
+        if (hand) n.pos.copy(hand);
+        else { n.phase = 'thrown'; n.orphaned = true; n.vel.set(0, 0, 0); n.mesh.visible = true; }
         n.mesh.position.copy(n.pos);
       }
+      // Background tabs get sparse callbacks. Fly through the real elapsed time before the fuse fires.
+      if (n.phase !== 'armed' && !n.rest) {
+        if (n.charged) { for (let left = Math.min(7.5, elapsed); left > 1e-8 && !n.rest;) { const step = Math.min(1 / 60, left); this._advanceNade(n, step); left -= step; } }
+        else if (n.fuse > 0) this._advanceNade(n, dt);
+      }
+      if (n.fuse <= 0) {
+        if (n === this._heldNade) {
+          this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeBlocked = true; this.nadeCd = 0.55;
+          n.phase = 'thrown'; if (this.onThrow) this.onThrow(this._grenadePacket(n));
+          if (this._arc) this.updateNadeArc(-1);
+        }
+        if (n.charged) this._nadeSeen.set(n.owner + '\0' + n.id, now + 30000);
+        ctx.scene.remove(n.mesh); this.nades.splice(i, 1); this.explodeNade(n); continue;
+      }
       // the fuse sparks faster as it runs out
-      if (Math.floor(n.tick * (n.fuse < 0.8 ? 14 : 5)) !== Math.floor((n.tick - dt) * (n.fuse < 0.8 ? 14 : 5))) ctx.effects.strokeBurst(n.pos.clone().add(_v.set(0, 0.22, 0)), INK.ORANGE, 2, 2.5, { life: 0.12, size: 0.02 });
-      if (n.fuse <= 0) { this.explodeNade(n); ctx.scene.remove(n.mesh); this.nades.splice(i, 1); }
+      if (Math.floor(n.tick * (n.fuse < 0.8 ? 14 : 5)) !== Math.floor((n.tick - elapsed) * (n.fuse < 0.8 ? 14 : 5))) ctx.effects.strokeBurst(n.pos.clone().add(_v.set(0, 0.22, 0)), INK.ORANGE, 2, 2.5, { life: 0.12, size: 0.02 });
     }
+  }
+  _advanceNade(n, dt) {
+    n.vel.y -= 22 * dt; _v2.copy(n.pos); n.pos.addScaledVector(n.vel, dt);
+    _d.subVectors(n.pos, _v2); const len = _d.length();
+    if (len > 1e-6) {
+      _d.divideScalar(len); const hit = this.ctx.world.raycast(_v2, _d, len + 0.16);
+      if (hit) {
+        n.pos.copy(hit.point).addScaledVector(hit.normal, 0.16);
+        const vn = n.vel.dot(hit.normal); if (vn < 0) { n.vel.addScaledVector(hit.normal, -1.45 * vn); n.vel.multiplyScalar(0.55); n.ang.multiplyScalar(0.6); audio.shell(); }
+        if (n.vel.length() < 1.2 && hit.normal.y > 0.5) { n.rest = true; n.vel.set(0, 0, 0); }
+      }
+    }
+    n.mesh.rotation.x += n.ang.x * dt; n.mesh.rotation.y += n.ang.y * dt; n.mesh.rotation.z += n.ang.z * dt;
+    n.mesh.position.copy(n.pos);
   }
   // One blast, whatever set it off. `mine` is the authority question and not a cosmetic one: the
   // client that owns the thing decides what it did to bots, props and other players, while everyone
@@ -432,11 +555,16 @@ export class Player {
     if (mine) { ctx.enemies.blastEnemies(c, R, o.enemyDmg || 120, null); if (ctx.blastBreakables) ctx.blastBreakables(c, R); }
     // me: my own explosion, or anyone else's that went off on my screen
     const d = this.center.distanceTo(c);
-    if (this.alive && d < hurtR) { this.takeDamage((o.selfBase ?? 10) + (o.selfMax ?? 34) * (1 - d / hurtR), c); this.knockback(_v.subVectors(this.center, c).normalize(), o.push || 9); }
+    if (o.selfDamage !== false && this.alive && d < hurtR) { this.takeDamage((o.selfBase ?? 10) + (o.selfMax ?? 34) * (1 - d / hurtR), c); this.knockback(_v.subVectors(this.center, c).normalize(), o.push || 9); }
     // other players in a versus match, decided by whoever set it off
     if (mine && ctx.targets) for (const t of ctx.targets()) { if (t.isLocal || !t.alive || (ctx.canHurt && !ctx.canHurt(t))) continue; const dd = t.center.distanceTo(c); if (dd < hurtR) t.takeDamage((o.pvpBase ?? 12) + (o.pvpMax ?? 50) * (1 - dd / hurtR), c); }
   }
-  explodeNade(n) { this.explode(n.pos, { mine: n.mine }); }
+  explodeNade(n) {
+    const ctx = this.ctx, oldId = ctx.currentGrenadeId, oldOwner = ctx.currentGrenadeOwner;
+    ctx.currentGrenadeId = n.charged ? n.id : null; ctx.currentGrenadeOwner = n.owner || null;
+    try { this.explode(n.pos, { mine: n.mine, selfDamage: !n.charged || n.mine }); }
+    finally { ctx.currentGrenadeId = oldId; ctx.currentGrenadeOwner = oldOwner; }
+  }
   _weaponState(sprinting, aiming, hs) {
     const inp = this.ctx.input, b = this.body;
     return { fire: inp.down('fire'), firePressed: inp.pressed('fire'), aim: aiming || (inp.down('aim') && this.weapon.kind === 'katana'), reloadPressed: inp.pressed('reload'), meleePressed: inp.pressed('melee') && this.weapon.kind === 'katana',
@@ -616,3 +744,4 @@ export class Player {
   }
 }
 const _ap = new THREE.Vector3(), _av = new THREE.Vector3(), _ad = new THREE.Vector3(), _aprev = new THREE.Vector3();
+const validNadeVector = (value, limit) => Array.isArray(value) && value.length === 3 && value.every((v) => Number.isFinite(v) && Math.abs(v) <= limit);

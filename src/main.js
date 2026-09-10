@@ -96,6 +96,13 @@ const bullets = ctx.bullets = new Bullets(ctx);
 player.name = myName;
 const net = new Net();
 const remote = new Map();      // peer id -> RemotePlayer
+ctx.grenadeNow = () => net.serverNow?.() ?? Date.now();
+ctx.localPlayerId = () => net.id || 'local';
+ctx.grenadeOwnerPos = (id) => {
+  const r = remote.get(id); if (!r || !r.alive) return null;
+  return r.center.clone().add(new THREE.Vector3(0, 0.35, 0));
+};
+input.onControlCancel = () => { player.cancelGrenade?.(); player.cancelKnife?.(); };
 const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal', skin: 'classic' };
 const colorSeats = new Map(); // recently departed ids -> { color, until }, shared with the next host
 const scores = new Map();      // peer id -> { name, kills, deaths }
@@ -169,6 +176,7 @@ ctx.hitPlayer = (t, dmg, info) => {
   // that player back to where our screen had them and decides. Send the ray we actually fired so
   // there is something to check it against; the katana has no ray, only a reach.
   const claim = { k: info.source, dmg: Math.round(dmg), crit: !!info.crit, part: info.part || null };
+  if (info.source === 'katana' && Number.isFinite(info.charge)) claim.charge = clamp(info.charge, 0, 1);
   if (info.tof > 0 && info.muzzle) {
     // A round that fell on the way there did not travel in a straight line, so there is no ray to
     // hand over. Send where it left from, where it landed and how long it was in the air instead
@@ -360,7 +368,7 @@ const MODIFIERS = [
 ];
 const tips = () => [
   t`hold <b>${hud.key('grapple')}</b> to reel in · tap it again to let go mid-swing`,
-  player.weaponAllowed('katana') ? t`block with <b>${hud.key('block')}</b> and some of their bullets go back at them` : ts('hold fire or grenade to aim - release to throw'),
+  player.weaponAllowed('katana') ? t`block with <b>${hud.key('block')}</b> and some of their bullets go back at them` : t`hold <b>${hud.key('fire')}</b> to charge; release to throw`,
   ts('kills in the air are worth more · stay off the floor'),
   player.infiniteGrenades ? t`unlimited grenades - hold <b>${hud.key('grenade')}</b> to aim, release to throw` : player.grenadesAllowed ? t`<b>${hud.key('grenade')}</b> lobs a grenade · pickups give you more` : ts('slash · hold aim to block & return bullets'),
   t`press <b>${hud.key('jump')}</b> again in the air for a double jump`,
@@ -460,7 +468,33 @@ enemies.onKill = (e, info, over) => {
   } else { const r = Math.random(); if (r < 0.5) spawnPickup('ammo', e.body.pos); else if (r < 0.62) spawnPickup('health', e.body.pos); }
 };
 enemies.onBoss = (e) => { if (!e.alive) { hud.setBoss(null, null); game.boss = null; } else { game.boss = e; hud.setBoss(e.T.name, e.hp / e.maxHp); } };
-player.onThrow = (d) => { if (net.active) net.broadcast('nade', d); };
+const localNadeAnnouncements = new Map();
+function pruneNadeAnnouncements() {
+  const now = ctx.grenadeNow();
+  for (const [id, entry] of localNadeAnnouncements) if (entry.d.expiresAt <= now || entry.owner !== net.id) localNadeAnnouncements.delete(id);
+}
+function announceGrenade(d, position = encodeLocal(player, player.weaponIndex)) {
+  // A quick first throw (or one straight after respawn) can precede the regular position feed.
+  net.broadcast('ps', position); net.broadcast('nade', d);
+}
+player.onThrow = (d) => {
+  if (d.charged && net.connected) {
+    pruneNadeAnnouncements();
+    d = { ...d, ...(d.phase === 'thrown' ? { thrownAt: ctx.grenadeNow() } : {}) };
+    if (d.expiresAt > ctx.grenadeNow()) localNadeAnnouncements.set(d.id, { d, position: encodeLocal(player, player.weaponIndex), owner: net.id });
+    while (localNadeAnnouncements.size > 32) localNadeAnnouncements.delete(localNadeAnnouncements.keys().next().value);
+  }
+  if (net.active) announceGrenade(d);
+};
+function replayLocalGrenades() {
+  pruneNadeAnnouncements();
+  // Re-register missed throws using their original launch, then correct peers to the current
+  // flight snapshot. Replaying an old armed event must never manufacture a fresh seven seconds.
+  for (const entry of localNadeAnnouncements.values()) if (entry.d.phase === 'thrown') announceGrenade(entry.d, entry.position);
+  net.broadcast('ps', encodeLocal(player, player.weaponIndex));
+  const rows = player.grenadeSnapshot().filter((n) => n.owner === net.id);
+  if (rows.length) net.broadcast('nadesync', rows);
+}
 
 // ---------------- focus slash (solo only) ----------------
 const FOCUS_TIME = 2.6, FOCUS_SCALE = 0.26, FOCUS_RANGE = 24, FOCUS_MAX_CHAIN = 2, FOCUS_ARM = 0.18, DASH_SPEED = 46, KATANA_CHARGE_KILLS = 3;
@@ -556,7 +590,7 @@ function onLocalDeath() {
   hud.kill(kn ? t`erased by ${kn}${tail}` : ts('erased'), 0);
 }
 function respawnLocal() {
-  player.reset(arenaSpawn()); player.name = myName; player.lastHitBy = null; player.lastHit = null; game.state = 'play'; player.shieldT = 2; hud.tip('spawn protection · 2s', 1.6);
+  player.reset(arenaSpawn(), true); player.name = myName; player.lastHitBy = null; player.lastHit = null; game.state = 'play'; player.shieldT = 2; hud.tip('spawn protection · 2s', 1.6);
   effects.strokeBurst(player.center, INK.BLUE, 24, 6, { life: 0.5, size: 0.03 }); audio.spawn(player.center);
 }
 function tallyDeath(victim, killer) {
@@ -623,7 +657,7 @@ function addRemote(id, name, color, appearance) {
     hud.hitmarker(false, false);
     // A blast is claimed by where it went off, not by a ray - the server checks that they were
     // standing inside it a round trip ago, and that we were near enough to have thrown it.
-    net.hit(t.id, { k: 'grenade', dmg: Math.round(amount), at });
+    net.hit(t.id, { k: 'grenade', dmg: Math.round(amount), at, ...(ctx.currentGrenadeId ? { gid: ctx.currentGrenadeId } : {}) });
   };
   remote.set(id, rp); return rp;
 }
@@ -677,7 +711,13 @@ net.onStall = (quiet, res) => {
     for (const p of members) if (p.id !== net.id && !lobby.players.has(p.id)) net.onPeerJoin(p.id, { name: p.name });
     broadcastLobby();
   } else net.send('lobbyreq', {});
+  if (inMatch()) { replayLocalGrenades(); net.broadcast('nadereq', {}); }
 };
+net.on('nadereq', (_d, from) => { if (inMatch()) net.sendTo(from, 'nadesync', player.grenadeSnapshot().filter((n) => n.owner === net.id)); });
+net.on('nadesync', (rows, from) => {
+  if (!inMatch() || !Array.isArray(rows)) return;
+  player.syncGrenades(from === net.hostId ? rows : rows.filter((n) => n && n.owner === from));
+});
 net.on('lobbyreq', () => { if (net.isHost) broadcastLobby(); });
 net.on('appearance', (value, from) => {
   if (!net.isHost) return;
@@ -725,7 +765,7 @@ net.onPeerJoin = (from, meta) => {
   colorSeats.delete(from); lobby.players.set(from, { name, color, appearance }); addRemote(from, name, color, appearance); broadcastLobby();
   if (game.state === 'play' || game.state === 'dying') {
     if (!scores.has(from)) scores.set(from, { name, kills: 0, deaths: 0 });
-    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
+    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), grenades: player.grenadeSnapshot(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
     // a latecomer has an empty world until it is told what is already standing in it
     if (coopHost()) setTimeout(() => sendCoopCatchUp(from), 350);
     sendScores(); hud.kill(t`${name} joined`, 0);
@@ -739,7 +779,7 @@ net.on('lobby', (d, from) => {
   renderLobby();
 });
 net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill(t`${nm || ts('someone')} left`, 0); renderLobby(); });
-net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, d.mode === 'coop' ? 'coop' : 'ffa'); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
+net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, d.mode === 'coop' ? 'coop' : 'ffa'); if (d.late && Array.isArray(d.grenades)) player.syncGrenades(d.grenades); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
 net.on('startreq', () => { if (net.isHost && game.state === 'lobby') hostStart(); });
 
 // ---------------- co-op: the host owns the enemies, everyone else mirrors them ----------------
@@ -835,7 +875,7 @@ net.on('pdead', (d, from) => {
   else hud.kill(kn ? t`${kn} erased ${vn}${how}` : t`${vn} fell off the page`, 0);
   if (net.isHost) tallyDeath(from, d.killer);
 });
-net.on('nade', (d) => player.throwGrenade(d));
+net.on('nade', (d, from) => { if (inMatch()) player.receiveGrenade(d, from); });
 net.on('brk', (d) => { const br = level.breakables[d.id]; if (br) breakProp(br, null, false); });
 net.on('parry', (d) => { audio.shieldHit(player.center); input.rumble(0.35, 0.3, 60); effects.strokeBurst(player.eye.clone().addScaledVector(player.forward, 0.5), INK.ORANGE, 8, 5, { life: 0.2, size: 0.03 }); hud.kill(d.ret ? 'RETURN TO SENDER' : 'DEFLECTED', d.ret ? 25 : 0); });
 net.on('shots', (d, from) => {
@@ -925,6 +965,8 @@ function coopUpdate(dt) {
   if (bodies.length && bodies.every((p) => !p.alive)) { const w = { id: null, name: null, coop: true, wave: game.wave, score: game.score }; net.send('end', w); endMatch(w); }
 }
 function leaveOnline(reason) {
+  player.cancelGrenade?.();
+  localNadeAnnouncements.clear();
   net.leave(); for (const id of [...remote.keys()]) removeRemote(id); lobby.players.clear(); colorSeats.clear(); scores.clear(); hud.setBoard(null);
   player.applyWeaponMode('normal'); if (touch) touch.setWeaponMode('normal'); applySkin();
   if (game.state !== 'start') { game.state = 'start'; game.mode = 'solo'; setArena(false); resetGame(); hud.setGameplayVisible(false); }
@@ -1267,6 +1309,7 @@ function resetGame() {
   applyRules();
   if (online() && player.regenRate > 0) { player.regenDelay *= 4 / 4.5; player.regenRate *= 14 / 11; }
   player.reset(level.playerStart); player.name = myName; player.lastHitBy = null; player.lastHit = null; enemies.mods.speed = 1; enemies.mods.damage = 1; hud.setModifier(''); hud.setBoss(null, null); game.boss = null; endFocus(); game.katanaStreak = 0; game.rocketDropped = false;
+  localNadeAnnouncements.clear();
   game.score = 0; game.kills = 0; game.combo = 0; game.wave = 0; game.intermission = 0; game.queue = []; game.time = 0; game.over = null; game.matchT = 0; hud.setScore(0, 0); hud.setTimer(''); hud.setPvpScore(null); hud.setWave(1, 0); hud.setBoard(null);
 }
 function beginCommon() { audio.init(); audio.resume(); if (!input.usingGamepad && !touchMode) input.requestLock(); if (musicWanted && !audio.musicPlaying) audio.musicOn(true); hud.hideScreen(); hud.setGameplayVisible(true); game.menu = false; }
@@ -1335,6 +1378,8 @@ function step(now) {
   // the thumbs are folded in first so Input.update sees them alongside the keyboard and the pad
   if (touch) { touch.setActive((game.state === 'play' || game.state === 'dying') && !game.menu); touch.update(); }
   input.update(dt);
+  // Fuses use their absolute deadline even while movement is paused or slowed.
+  player.tickGrenades?.(dt);
   const st = game.state; const playing = st === 'play' || st === 'dying';
   // the config screen eats every key that would otherwise dismiss the screen underneath it
   if (cfgBack) { if (input.pressed('jump') || input.pressed('confirm') || input.pressed('pause')) closeConfig(); }
@@ -1393,10 +1438,13 @@ function step(now) {
   else hud.setCycle(0, '');
   // A weapon you have not found yet has no slot. The rocket is last in the list, so dropping it
   // leaves every other slot on the number it has always been on.
-  const slotState = player.weapons.map((wp, i) => ({ slot: i + 1, key: wp.kind === 'grenade' ? hud.key('grenade') : String(i + 1), name: wp.name, active: i === player.weaponIndex, ammo: wp.isGun ? wp.mag + '/' + wp.reserve : '∞', empty: wp.isGun && wp.mag === 0 && wp.reserve === 0, locked: wp.locked || !player.weaponAllowed(i) })).filter((s) => !s.locked);
+  const slotState = player.weapons.map((wp, i) => ({ slot: i + 1, key: wp.kind === 'grenade' ? hud.key('fire') : String(i + 1), name: wp.name, active: i === player.weaponIndex, ammo: wp.isGun ? wp.mag + '/' + wp.reserve : '∞', empty: wp.isGun && wp.mag === 0 && wp.reserve === 0, locked: wp.locked || !player.weaponAllowed(i) })).filter((s) => !s.locked);
   hud.setSlots(slotState); if (touch) touch.setSlots(slotState);
   hud.setWeaponMode(online() ? weaponModeOf(ctx.weaponMode()).name : null);
-  hud.setGrenades(player.infiniteGrenades ? Infinity : player.grenadesAllowed ? player.grenades : 0); hud.setGrappleStamina(player.grapStam); hud.setHealth(player.hp, player.maxHp); hud.setSpread(w.spreadPx); hud.update(dt);
+  hud.setGrenades(player.infiniteGrenades ? Infinity : player.grenadesAllowed ? player.grenades : 0);
+  hud.setGrenadeState?.(player.weaponRules.key === 'grenades' ? player.grenadeStatus : null); if (touch) touch.setGrenadeState?.(player.grenadeStatus);
+  hud.setKnifeState?.(player.knifeStatus);
+  hud.setGrappleStamina(player.grapStam); hud.setHealth(player.hp, player.maxHp); hud.setSpread(w.spreadPx); hud.update(dt);
   if (online()) hud.setFocusMeter(playing, player.grapStam, false, 'GRAPPLE');
   else hud.setFocusMeter(playing && (w.kind === 'katana' || game.katanaStreak > 0 || game.focus.active), game.focus.active ? 1 : clamp(game.katanaStreak / KATANA_CHARGE_KILLS, 0, 1), game.focus.active, 'KATANA');
   if (game.boss) { if (game.boss.alive) hud.setBoss(game.boss.T.name, game.boss.hp / game.boss.maxHp); else { hud.setBoss(null, null); game.boss = null; } }

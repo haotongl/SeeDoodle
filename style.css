@@ -188,6 +188,18 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .nades { display: inline-flex; gap: 3px; margin-left: 12px; vertical-align: middle; }
 .nades i { width: 13px; height: 15px; border: 2.5px solid var(--ink); border-radius: 50% 50% 45% 45%; display: inline-block; position: relative; top: -2px; }
 .nades i::after { content: ''; position: absolute; left: 3px; top: -6px; width: 3px; height: 5px; background: var(--red); }
+.nade-state { position: absolute; left: 50%; top: calc(50% + 50px); width: 210px; transform: translateX(-50%); color: var(--ink); opacity: .76; pointer-events: none; font-size: 13px; line-height: 1.3; text-shadow: 0 1px 2px rgba(255,248,229,.65); }
+.nade-state[hidden], #hud.nogame .nade-state { display: none; }
+.nade-readout { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.nade-readout b { font-size: 16px; font-variant-numeric: tabular-nums; font-weight: normal; }
+.nade-charge { height: 3px; margin: 3px 0 4px; overflow: hidden; border-radius: 2px; background: rgba(32,62,72,.16); }
+.nade-charge i { display: block; height: 100%; width: 0; background: currentColor; }
+.nade-state small { display: block; font-size: 11px; text-align: center; }
+.nade-state.armed { color: #b66324; }
+.nade-state.urgent { color: #c9362c; opacity: .92; }
+#hud.touch .nade-state { top: calc(50% + 38px); width: 148px; font-size: 11px; }
+#hud.touch .nade-readout b { font-size: 14px; }
+@media (max-height: 400px) { #hud.touch .nade-state { top: calc(50% - 82px); } }
 /* lobby + modes */
 .modes { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; margin: 10px 0 4px; }
 .modebtn { font: inherit; font-size: 21px; color: var(--ink); background: transparent; border: 2.5px solid var(--ink); border-radius: 7px 10px 6px 9px / 10px 6px 9px 7px; padding: 6px 14px; cursor: pointer; opacity: .6; display: flex; flex-direction: column; align-items: center; line-height: 1.1; transform: rotate(-.5deg); min-width: 130px; }
@@ -316,6 +328,8 @@ body.touch, body.touch #c { overscroll-behavior: none; touch-action: none; -webk
 .b-hook { right: calc(18px + var(--sar)); bottom: calc(212px + var(--sab)); width: 58px; height: 58px; font-size: 12px; }
 .b-melee { right: calc(198px + var(--sar)); bottom: calc(56px + var(--sab)); width: 56px; height: 56px; font-size: 11px; }
 .b-nade { right: calc(190px + var(--sar)); bottom: calc(146px + var(--sab)); width: 54px; height: 54px; font-size: 12px; }
+.b-nade-cancel { right: calc(198px + var(--sar)); bottom: calc(56px + var(--sab)); width: 56px; height: 56px; font-size: 11px; }
+.tb.b-nade-cancel.live { color: var(--red); border-color: var(--red); }
 /* weapons along the bottom edge, where either thumb can reach them. These double as the weapon
    readout, so they are squarer and quieter than the action rings and carry three states. */
 /* The row is centred on the screen until that would slide the fourth one under AIM, and from there

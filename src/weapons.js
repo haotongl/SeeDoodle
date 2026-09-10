@@ -416,12 +416,12 @@ export class Rocket extends Gun {
 
 export class Grenade extends ViewModel {
   constructor(ctx) {
-    super(ctx); this.name = 'GRENADES'; this.hint = 'hold fire or grenade to aim - release to throw'; this.kind = 'grenade'; this.locked = true;
+    super(ctx); this.name = 'GRENADES'; this.hint = 'hold LMB / G; full charge pulls pin - release to throw, V cancels'; this.kind = 'grenade'; this.locked = true;
     this.basePos.set(0.2, -0.2, -0.38); this.aimPos.copy(this.basePos);
     const mat = this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }), dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }), orange = makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' });
     sph(0.16, 0, 0, 0, dark, this.root);
     cyl(0.06, 0.1, 0, 0.17, 0, orange, this.root, 'y', 6);
-    const pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.root.add(pin);
+    const pin = this.pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.root.add(pin);
     hand(mat, 0, -0.1, 0.035, this.root, [0.45, -0.5, 1]);
     const g = this.appearanceDetails = new THREE.Group(); this.root.add(g);
     for (const y of [-0.065, 0.04]) { const band = new THREE.Mesh(new THREE.TorusGeometry(Math.sqrt(0.16 * 0.16 - y * y), 0.012, 5, 12), mat); band.rotation.x = Math.PI / 2; band.position.y = y; g.add(band); }
@@ -431,19 +431,21 @@ export class Grenade extends ViewModel {
   get spreadPx() { return 4; }
   update() {
     // Player owns the shared grenade input and cooldown, so FIRE and G cannot produce two throws.
-    const charge = this.ctx.player?._nadeHeld ? this.ctx.player.nadeCharge : 0;
+    const state = this.ctx.player?.grenadeStatus, charge = state?.state !== 'idle' ? state?.charge || 0 : 0;
+    this.pin.visible = state?.state !== 'armed';
     this.root.position.y += charge * 0.045; this.root.position.z += charge * 0.06; this.root.rotation.x -= charge * 0.35;
   }
 }
 
 export class Katana extends ViewModel {
   constructor(ctx) {
-    super(ctx); this.name = 'KATANA'; this.hint = 'slash · hold aim to block & return bullets'; this.kind = 'katana';
+    super(ctx); this.name = 'KATANA'; this.hint = 'hold fire to charge - release to slash; aim to block'; this.kind = 'katana';
     this.basePos.set(0.27, -0.25, -0.4); this.baseRot.set(0.75, 0.15, -0.35); this.aimPos.copy(this.basePos);
     this.slashT = 0; this.slashDur = 0.27; this.combo = 0; this.comboT = 0; this.blocking = false; this.blockT = 0; this.blockAmt = 0; this.hitDone = false; this.cooldown = 0; this.damage = 75;
     // guard pose: the sword simply comes in close to the face, held upright
     this.blockPos = new THREE.Vector3(0.21, -0.31, -0.36); this.blockRot = new THREE.Vector3(1.40, 0.30, 1.24); this.deflectKick = 0;
     this.parrySwing = 0; this.parryDir = 1; this.bloodLevel = 0;
+    this.charge = 0; this.charging = false; this.chargeBlocked = false; this.slashCharge = 0;
     this.build(); this.setSkin(this._skin, this._appearanceInk);
   }
   build() {
@@ -482,10 +484,14 @@ export class Katana extends ViewModel {
     }
   }
   get spreadPx() { return 4; }
-  startSlash(st) {
+  cancelCharge(latch = true) { const held = this.charging || this.ctx.input.down('fire'); this.charging = false; this.charge = 0; if (latch) this.chargeBlocked = held; }
+  unequip() { this.cancelCharge(); super.unequip(); }
+  startSlash(st, charge = 0) {
     if (!this.allowed) return false;
+    if (st.fire && !this.charging) this.chargeBlocked = true;
+    this.cancelCharge(false); this.slashCharge = charge <= 0.1 ? 0 : clamp(charge, 0, 1);
     this.slashT = this.slashDur; this.hitDone = false; this.combo++; this.comboT = 0.9; this.cooldown = this.slashDur + 0.06;
-    audio.katanaSwing(); this.ctx.player.kickFov(2);
+    audio.katanaSwing(); this.ctx.player.kickFov(2 + charge * 0.8);
     if (st.sprinting || !st.grounded) this.ctx.player.lunge(5.5);
     const P = this.ctx.player, s = this.combo % 2 === 0 ? -1 : 1; const up = _v2.set(0, 1, 0);
     for (let i = 0; i < 9; i++) {
@@ -494,14 +500,24 @@ export class Katana extends ViewModel {
       const pb = P.eye.clone().addScaledVector(P.forward, 1.3).addScaledVector(P.right, Math.cos(b) * 0.9 * s).addScaledVector(up, Math.sin(b) * 0.55 - 0.1);
       this.ctx.effects.tracer(pa, pb, INK.BLUE, 0.03 - 0.002 * i, 0.12 + i * 0.01);
     }
+    return true;
   }
   update(dt, st) {
-    if (!this.allowed) { this.slashT = 0; this.blocking = false; return; }
+    if (!this.allowed) { this.cancelCharge(); this.slashT = 0; this.blocking = false; return; }
+    const controlsAvailable = this.ctx.player._grenadeControlsAllowed(), canInput = controlsAvailable && !st.blockFire;
     this.cooldown -= dt; this.comboT -= dt; if (this.comboT <= 0) this.combo = 0; this.deflectKick = Math.max(0, this.deflectKick - dt * 6);
     this.parrySwing = Math.max(0, this.parrySwing - dt * 4.5);
     this.updateBlood(dt, st);
+    if (!st.fire) this.chargeBlocked = false;
+    if (!canInput || st.aim) this.cancelCharge();
+    // Quick taps keep their original cut; holding winds up one stronger cut on release.
+    if (st.meleePressed && this.slashT <= 0 && this.cooldown <= 0 && controlsAvailable) { this.cancelCharge(); this.startSlash(st); }
+    else if (canInput && !st.aim && this.slashT <= 0 && this.cooldown <= 0 && !this.chargeBlocked) {
+      if (st.fire) { this.charging = true; this.charge = Math.min(1, this.charge + dt / 0.8); }
+      else if (this.charging) this.startSlash(st, this.charge);
+    }
     // guard is up only while the aim trigger is held and you are not swinging
-    const wantBlock = st.aim && !st.fire && this.slashT <= 0 && this.cooldown <= 0;
+    const wantBlock = controlsAvailable && st.aim && (!st.fire || this.chargeBlocked) && this.slashT <= 0 && this.cooldown <= 0;
     if (wantBlock && !this.blocking) this.blockT = 0;
     this.blocking = wantBlock; if (this.blocking) this.blockT += dt;
     this.blockAmt = damp(this.blockAmt, this.blocking ? 1 : 0, 16, dt);
@@ -520,24 +536,24 @@ export class Katana extends ViewModel {
       r.z += this.parryDir * e * 0.42; r.y += this.parryDir * e * 0.16;
       p.x += this.parryDir * e * 0.035;
     }
+    if (this.charging) { const c = 0.25 + this.charge * 0.75; p.x += c * 0.09; p.y += c * 0.05; p.z += c * 0.1; r.x += c * 0.5; r.y -= c * 0.6; r.z -= c * 0.35; }
     if (this.slashT > 0) {
       this.slashT -= dt; const t = clamp(1 - this.slashT / this.slashDur, 0, 1); const e = easeInOut(t); const s = this.combo % 2 === 0 ? -1 : 1;
       r.z += s * (1.3 - 2.7 * e); r.x += 0.7 - 1.5 * e; r.y += s * (-0.35 + 0.8 * e);
       p.x += s * (0.2 - 0.45 * e); p.y += 0.14 - 0.24 * e; p.z -= 0.12 * Math.sin(t * Math.PI);
       if (!this.hitDone && t > 0.32) { this.hitDone = true; this.doHit(st, s); }
-    } else if ((st.firePressed || (st.fire && this.combo > 0)) && this.cooldown <= 0 && !st.blockFire) this.startSlash(st);
-    if (st.meleePressed && this.slashT <= 0 && this.cooldown <= 0) this.startSlash(st);
+    }
   }
   doHit(st, s) {
     if (!this.allowed) return;
-    const ctx = this.ctx, P = ctx.player;
+    const ctx = this.ctx, P = ctx.player, multiplier = 1 + 2 * this.slashCharge;
     const hits = ctx.enemies.inArc(P.eye, P.forward, 3.0, Math.cos(0.95));
     _v2.copy(P.forward); _v.set(-P.forward.z, 0, P.forward.x).multiplyScalar(s * 0.7); _v2.add(_v).y -= 0.35; _v2.normalize();
     let any = false;
-    for (const h of hits) { any = true; const point = h.enemy.center.clone(); point.y += rand(-0.2, 0.4); ctx.enemies.damage(h.enemy, this.damage, { point, dir: _v2.clone(), part: 'torso', source: 'katana', crit: false, slashDir: s }); }
-    if (ctx.playersInArc) for (const t of ctx.playersInArc(P.eye, P.forward, 3.0, Math.cos(0.95))) { any = true; ctx.hitPlayer(t, 55, { point: t.center.clone(), dir: _v2.clone(), part: 'torso', source: 'katana', crit: false }); }
+    for (const h of hits) { any = true; const point = h.enemy.center.clone(); point.y += rand(-0.2, 0.4); ctx.enemies.damage(h.enemy, this.damage * multiplier, { point, dir: _v2.clone(), part: 'torso', source: 'katana', crit: false, slashDir: s }); }
+    if (ctx.playersInArc) for (const t of ctx.playersInArc(P.eye, P.forward, 3.0, Math.cos(0.95))) { any = true; ctx.hitPlayer(t, 55 * multiplier, { point: t.center.clone(), dir: _v2.clone(), part: 'torso', source: 'katana', crit: false, charge: this.slashCharge }); }
     if (ctx.cutRopes && ctx.cutRopes(P.eye, P.forward, 3.4)) any = true;
-    if (ctx.breakablesInArc) for (const br of ctx.breakablesInArc(P.eye, P.forward, 3.2, Math.cos(1.0))) { any = true; ctx.breakHit(br, this.damage, br.pos.clone(), _v2.clone()); }
+    if (ctx.breakablesInArc) for (const br of ctx.breakablesInArc(P.eye, P.forward, 3.2, Math.cos(1.0))) { any = true; ctx.breakHit(br, this.damage * multiplier, br.pos.clone(), _v2.clone()); }
     // a swing only cuts; bullets are turned aside by the raised guard, never by a slash
     if (any) { audio.katanaHit(); ctx.game.hitstop(0.07, 0.12); ctx.effects.shakeAmt += 0.12; ctx.input.rumble(0.7, 0.4, 90); this.recoil.kick(0, 0, 1.5); }
   }
