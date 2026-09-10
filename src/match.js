@@ -178,8 +178,12 @@ export class TeamMatch {
     if (s.phase === 'roundover') { if (now >= s.endsAt) this.nextRound(); return; }
     if (s.phase !== 'live') return;
     if (s.mode === 'tdm') {
-      for (const a of s.actors) if (!a.alive && a.respawnAt && now >= a.respawnAt) this.spawn(a);
+      let respawned = false;
+      for (const a of s.actors) if (!a.alive && a.respawnAt && now >= a.respawnAt) { this.spawn(a); respawned = true; }
       if (Math.max(...s.points) >= MATCH_RULES.target || now >= s.endsAt) { s.phase = 'over'; s.winner = s.points[0] === s.points[1] ? null : s.points[0] > s.points[1] ? 0 : 1; this.publish(true); }
+      // Apply the new body in the same tick as its life. A throttled snapshot leaves the old
+      // corpse alive in the roster, so the next frame's death retry would score it again.
+      else if (respawned) this.publish(true);
       return;
     }
     const bomb = s.bomb;
@@ -215,7 +219,7 @@ export class TeamMatch {
   update(dt) {
     if (!this.active() || !this.state) { this.panel.hidden = true; this.marker.visible = false; return; }
     const s = this.state, inp = this.ctx.input, p = this.ctx.player, mine = this.actor(this.net.id), now = this.now();
-    if (s.phase === 'live' && mine?.alive && !p.alive && now >= (this.deathRetryAt || 0)) {
+    if (s.phase === 'live' && mine?.alive && this.applied.get(this.net.id) === mine.life && !p.alive && now >= (this.deathRetryAt || 0)) {
       this.deathRetryAt = now + 750;
       const death = { killer: p.lastHitBy || null, life: mine.life, round: s.round };
       if (this.net.isHost) this.death(this.net.id, death.killer, death.life, death.round); else this.net.broadcast('pdead', death);
