@@ -41,7 +41,7 @@ export class TeamMatch {
   team(id) { return this.actor(id)?.team ?? this.lobby.players.get(id)?.team ?? 0; }
   canFight() { return !this.active() || this.state?.phase === 'live'; }
   canHurt(id, target) { return this.state?.phase === 'live' && this.team(id) !== this.team(target) && this.actor(target)?.alive && this.actor(target).protectedUntil <= this.now(); }
-  clear() { this.state = null; this.appliedRound = null; this.applied.clear(); this.intents.clear(); this.panel.hidden = true; this.marker.visible = false; this.bots.clear?.(); this.ctx.touch?.setObjective?.(false, null, false); this.ctx.hud.root.classList.remove('team-game'); }
+  clear() { this.state = null; this.appliedRound = null; this.explosionRound = null; this.applied.clear(); this.intents.clear(); this.panel.hidden = true; this.marker.visible = false; this.bots.clear?.(); this.ctx.touch?.setObjective?.(false, null, false); this.ctx.hud.root.classList.remove('team-game'); }
   start() {
     this.applied.clear(); this.intents.clear(); this.state = { mode: this.ctx.game.mode, round: 0, phase: 'warmup', endsAt: 0, attackTeam: 0, points: [0, 0], actors: [], bomb: null, interaction: null, reason: '', winner: null };
     this.nextRound();
@@ -103,6 +103,9 @@ export class TeamMatch {
       if (!a.alive) { b.alive = false; if (a.id === this.net.id) { game.state = game.over ? 'over' : 'dying'; P.rig.visible = false; } }
       if (a.bot && a.ps && !this.net.isHost) b.push(a.ps, performance.now() / 1000);
       if (a.id === this.net.id) P.shieldT = Math.max(0, (a.protectedUntil - this.now()) / 1000);
+    }
+    if (s.reason === 'BOMB EXPLODED' && s.bomb?.pos && this.explosionRound !== s.round) {
+      this.explosionRound = s.round; const pos = vec(s.bomb.pos); this.ctx.effects.boom(pos, 12); this.ctx.audio.explosion(pos);
     }
     if (s.phase === 'over' && !game.over) this.endMatch({ team: s.winner, name: s.winner == null ? ts('DRAW') : ts(TEAM_NAMES[s.winner]), draw: s.winner == null });
   }
@@ -203,7 +206,7 @@ export class TeamMatch {
       if (interaction.kind === 'plant' && interaction.endsAt <= s.endsAt) { bomb.status = 'planted'; bomb.carrier = null; bomb.pos = [...interaction.pos]; bomb.site = interaction.site; bomb.explodeAt = interaction.endsAt + MATCH_RULES.fuse; s.interaction = null; }
       else if (interaction.kind === 'defuse') { this.roundWin(1 - s.attackTeam, 'BOMB DEFUSED'); return; }
     }
-    if (bomb?.status === 'planted' && now >= bomb.explodeAt) { this.ctx.effects.boom(vec(bomb.pos), 12); this.ctx.audio.explosion(vec(bomb.pos)); this.roundWin(s.attackTeam, 'BOMB EXPLODED'); return; }
+    if (bomb?.status === 'planted' && now >= bomb.explodeAt) { this.roundWin(s.attackTeam, 'BOMB EXPLODED'); return; }
     const alive = [0, 1].map((team) => s.actors.filter((a) => a.team === team && a.alive).length);
     if (!alive[1 - s.attackTeam]) { this.roundWin(s.attackTeam, 'DEFENDERS ELIMINATED'); return; }
     if (bomb?.status !== 'planted' && !alive[s.attackTeam]) { this.roundWin(1 - s.attackTeam, 'ATTACKERS ELIMINATED'); return; }
