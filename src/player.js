@@ -415,6 +415,7 @@ export class Player {
     if (this._heldNade) this._releaseGrenade(true);
     this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeBlocked = held;
     this._nadeChargeStart = null; this._nadeChargeSources.clear(); this._nadeChargeAfter = performance.now();
+    this.weapons[this.grenadeIndex].resetThrowPose?.();
     if (this._arc) this.updateNadeArc(-1);
   }
   _primeGrenade(announce = true, primedAt = this._grenadeNow()) {
@@ -441,7 +442,7 @@ export class Player {
     else this._nadeLaunch(charge, n.pos, n.vel);
     n.mesh.position.copy(n.pos); this.nadeCd = 0.55;
     if (this.onThrow) this.onThrow(this._grenadePacket(n));
-    if (!drop) this._grenadeThrowFeedback();
+    if (!drop) this._grenadeThrowFeedback(charge);
     if (this._arc) this.updateNadeArc(-1);
     return true;
   }
@@ -451,8 +452,10 @@ export class Player {
     if (this.weaponRules.key === 'grenades') { const gain = 1 + 0.5 * charge; vel.x *= gain; vel.z *= gain; }
     vel.addScaledVector(this.body.vel, 0.5); vel.y += 3.5 + 2.5 * charge;
   }
-  _grenadeThrowFeedback() {
-    this.weapon.recoil.kick(-0.4, 0.5, 1.2); this.weapon.recoilRot.kick(-3, 0, -1.5); audio.grappleFire(); this.ctx.input.rumble(0.2, 0.4, 50);
+  _grenadeThrowFeedback(charge = 0) {
+    if (this.weapon.onGrenadeThrow) this.weapon.onGrenadeThrow(charge);
+    else { this.weapon.recoil.kick(-0.4, 0.5, 1.2); this.weapon.recoilRot.kick(-3, 0, -1.5); }
+    audio.grappleFire(); this.ctx.input.rumble(0.2, 0.4, 50);
   }
   throwGrenade(remote = null, charge = 0) {
     if (!this.grenadesAllowed || (!remote && (!this.alive || this.dashLock || this.nadeCd > 0 || (!this.infiniteGrenades && this.grenades <= 0)))) return false;
@@ -553,6 +556,7 @@ export class Player {
         if (n === this._heldNade) {
           this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeBlocked = true; this.nadeCd = 0.55;
           this._nadeChargeStart = null; this._nadeChargeSources.clear(); this._nadeChargeAfter = performance.now();
+          this.weapons[this.grenadeIndex].resetThrowPose?.();
           n.phase = 'thrown'; if (this.onThrow) this.onThrow(this._grenadePacket(n));
           if (this._arc) this.updateNadeArc(-1);
         }

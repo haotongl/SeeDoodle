@@ -419,13 +419,16 @@ export class Grenade extends ViewModel {
     super(ctx); this.name = 'GRENADES'; this.hint = 'hold LMB / G; full charge pulls pin - release to throw, V cancels'; this.kind = 'grenade'; this.locked = true;
     this.scale = 0.32; this.root.scale.setScalar(this.scale);
     this.basePos.set(0.24, -0.2, -0.44); this.aimPos.copy(this.basePos);
+    this.grip = new THREE.Group(); this.root.add(this.grip);
+    this.payload = new THREE.Group(); this.grip.add(this.payload);
+    this.raise = 0; this.throwAt = null; this.poseAt = performance.now();
+    this.wrist = new THREE.Vector3(); this.elbow = new THREE.Vector3(); this.shoulder = new THREE.Vector3(1.45, -1.35, 1.3);
     const mat = this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }), dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }), orange = makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' });
-    sph(0.16, 0, 0, 0, dark, this.root);
-    cyl(0.06, 0.1, 0, 0.17, 0, orange, this.root, 'y', 6);
-    const pin = this.pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.root.add(pin);
-    // The smaller hand still needs a forearm that reaches the edge on wide phone viewports.
-    hand(mat, 0, -0.1, 0.035, this.root, [0.45, -0.5, 1], 1.3);
-    const g = this.appearanceDetails = new THREE.Group(); this.root.add(g);
+    sph(0.16, 0, 0, 0, dark, this.payload);
+    cyl(0.06, 0.1, 0, 0.17, 0, orange, this.payload, 'y', 6);
+    const pin = this.pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.payload.add(pin);
+    this._buildThrowingArm();
+    const g = this.appearanceDetails = new THREE.Group(); this.payload.add(g);
     for (const y of [-0.065, 0.04]) { const band = new THREE.Mesh(new THREE.TorusGeometry(Math.sqrt(0.16 * 0.16 - y * y), 0.012, 5, 12), mat); band.rotation.x = Math.PI / 2; band.position.y = y; g.add(band); }
     bx(0.035, 0.2, 0.03, 0.11, 0.15, 0, orange, g).rotation.z = -0.3;
     this.setSkin(this._skin, this._appearanceInk);
@@ -434,12 +437,73 @@ export class Grenade extends ViewModel {
     this.ctx.camera.userData.translucentViewModel = this.root;
   }
   get spreadPx() { return 4; }
+  _buildThrowingArm() {
+    const cloth = viewMaterial('cloth', this._appearanceInk), skin = viewMaterial('skin', this.appearance.tone), glove = viewMaterial('cloth');
+    const segment = (r1, r2) => {
+      const pivot = new THREE.Group(), classic = new THREE.Group(), toon = new THREE.Group(); pivot.add(classic, toon); this.root.add(pivot);
+      classic.add(new THREE.Mesh(new THREE.CylinderGeometry(r1 * 0.72, r2 * 0.72, 1, 8), this.mat));
+      const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(r1, r2, 1, 10), cloth); toon.add(sleeve);
+      this.appearanceHands.push({ classic, toon, sleeve, skinMeshes: [] }); return pivot;
+    };
+    this.upperArm = segment(0.11, 0.1); this.forearm = segment(0.095, 0.06);
+    const classic = new THREE.Group(), toon = new THREE.Group(); this.grip.add(classic, toon);
+    const sleeve = cyl(0.063, 0.085, 0, -0.16, 0.135, cloth, toon, 'y', 10); sleeve.rotation.x = -0.3;
+    const palm = sph(0.079, 0, -0.075, 0.13, skin, toon, 10); palm.scale.set(1, 1.12, 0.64);
+    sph(0.06, 0, -0.087, 0.163, glove, toon, 9).scale.set(1, 1, 0.42);
+    sph(0.068, 0, -0.075, 0.13, this.mat, classic, 8).scale.set(1, 1.12, 0.65);
+    this.fingers = [];
+    for (const [group, material] of [[classic, this.mat], [toon, skin]]) {
+      for (let i = 0; i < 4; i++) {
+        const finger = new THREE.Group(); finger.position.set(-0.054 + i * 0.036, -0.025, 0.13); group.add(finger);
+        cyl(0.017, 0.07, 0, 0.03, 0, material, finger, 'y', 7);
+        const tip = new THREE.Group(); tip.position.y = 0.064; finger.add(tip);
+        cyl(0.015, 0.05, 0, 0.022, 0, material, tip, 'y', 7);
+        this.fingers.push({ finger, tip });
+      }
+      const thumb = cyl(0.026, 0.095, -0.067, -0.022, 0.083, material, group, 'y', 8); thumb.rotation.z = -0.6; thumb.rotation.x = -0.55;
+    }
+    const skinMeshes = []; toon.traverse((o) => { if (o.material === skin) skinMeshes.push(o); });
+    this.appearanceHands.push({ classic, toon, sleeve, skinMeshes });
+  }
+  _armSegment(segment, from, to) {
+    _v.subVectors(to, from); segment.position.copy(from).addScaledVector(_v, 0.5);
+    segment.scale.set(1, _v.length(), 1); segment.quaternion.setFromUnitVectors(_v2.set(0, 1, 0), _v.normalize());
+  }
+  resetThrowPose() { this.throwAt = null; this.raise = 0; this.payload.visible = true; this.poseAt = performance.now(); }
+  equip() { this.resetThrowPose(); super.equip(); }
+  unequip() { this.resetThrowPose(); super.unequip(); }
+  // A quick release can interrupt the raise; start the swing at that pose rather than snapping to full charge.
+  onGrenadeThrow(charge = 0) { this.throwAt = performance.now(); this.throwCharge = charge; this.throwRaise = this.raise; this.payload.visible = false; }
   update() {
-    // Player owns the shared grenade input and cooldown, so FIRE and G cannot produce two throws.
     const state = this.ctx.player?.grenadeStatus, held = !!state && state.state !== 'idle';
+    const now = performance.now(), dt = Math.max(0, (now - this.poseAt) / 1000); this.poseAt = now;
+    const elapsed = this.throwAt === null ? Infinity : (now - this.throwAt) / 1000;
+    const throwing = elapsed < 0.5, p = this.root.position, r = this.root.rotation;
+    if (!throwing) this.raise = damp(this.raise, held ? 1 : 0, 22, dt);
     this.pin.visible = state?.state !== 'armed';
-    this.root.scale.setScalar(held ? 0.23 : this.scale); this.root.userData.viewOpacity = held ? 0.44 : 0.68;
-    if (held) { this.root.position.x += 0.11; this.root.position.y += 0.1; this.root.position.z -= 0.04; this.root.rotation.x -= 0.25; }
+    this.payload.visible = !throwing || elapsed >= 0.38;
+    let open = 0, reach = 0;
+    if (throwing) {
+      // The projectile already left on release: follow through empty-handed, then fetch the next one below view.
+      const swing = clamp(elapsed / 0.15, 0, 1), lower = easeInOut(clamp((elapsed - 0.15) / 0.2, 0, 1));
+      const recover = easeInOut(clamp((elapsed - 0.35) / 0.15, 0, 1));
+      reach = Math.sin(swing * Math.PI / 2) * (1 - lower); open = (1 - recover) * Math.min(1, swing * 3);
+      p.x += lerp(lerp(this.throwRaise * 0.1, -0.055, reach), 0.02, lower) * (1 - recover);
+      p.y += lerp(lerp(this.throwRaise * 0.13, 0.045, reach), -0.23, lower) * (1 - recover);
+      p.z += lerp(lerp(-this.throwRaise * 0.05, -0.19 - this.throwCharge * 0.045, reach), 0.03, lower) * (1 - recover);
+      r.x -= lerp(lerp(this.throwRaise * 0.18, 0.95, reach), 0.45, lower) * (1 - recover);
+      r.z -= lerp(this.throwRaise * 0.12, 0.12, reach) * (1 - recover);
+      this.raise = lerp(this.throwRaise, 1, swing) * (1 - recover);
+    } else {
+      p.x += this.raise * 0.1; p.y += this.raise * 0.13; p.z -= this.raise * 0.05;
+      r.x -= this.raise * 0.18; r.z -= this.raise * 0.12;
+    }
+    this.root.scale.setScalar(lerp(this.scale, 0.23, this.raise)); this.root.userData.viewOpacity = lerp(0.68, 0.44, this.raise);
+    this.grip.rotation.set(0.08 - open * 0.5, -0.12, -0.1);
+    for (const { finger, tip } of this.fingers) { finger.rotation.x = lerp(-1.0, -0.12, open); tip.rotation.x = lerp(-0.95, -0.08, open); }
+    this.wrist.set(0, -0.175, 0.135).applyEuler(this.grip.rotation);
+    this.elbow.set(0.18 + reach * 0.3, -0.86 + reach * 0.15, 0.62 + reach * 0.12);
+    this._armSegment(this.forearm, this.wrist, this.elbow); this._armSegment(this.upperArm, this.elbow, this.shoulder);
   }
 }
 
