@@ -30,6 +30,7 @@ export function encodeLocal(P, weaponIndex, extra = {}) {
     (P.crouching ? 1 : 0) | (P.sliding ? 2 : 0) | (P.isBlocking ? 4 : 0) | (P._aiming ? 8 : 0) | (b.onGround ? 16 : 0) | (extra.firing ? 32 : 0) | (P.alive ? 64 : 0) | (grappling ? 128 : 0) | (P.parryWindow ? 256 : 0) | (extra.idle ? 512 : 0) | (extra.untouched ? 1024 : 0) | (extra.away ? 2048 : 0),
     Math.round(P.hp), +b.vel.x.toFixed(1), +b.vel.y.toFixed(1), +b.vel.z.toFixed(1)];
   if (grappling) out.push(+g.hook.x.toFixed(1), +g.hook.y.toFixed(1), +g.hook.z.toFixed(1));
+  if (Number.isSafeInteger(extra.round) && Number.isSafeInteger(extra.life)) { while (out.length < 14) out.push(0); out.push(extra.round, extra.life); }
   return out;
 }
 

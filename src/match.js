@@ -18,8 +18,10 @@ const clock = (ms) => { const s = Math.max(0, Math.ceil(ms / 1000)); return Math
 export class TeamMatch {
   constructor(ctx, api) {
     this.ctx = ctx; Object.assign(this, api); this.state = null; this.intents = new Map(); this.applied = new Map(); this.syncAt = 0; this.intentAt = 0; this.spectator = 0;
+    this.objectiveSeq = ctx.input.holdEventSeq; this.objectiveSerial = 0; this.objectiveHold = 0; this.objectiveHeld = false;
     this.bots = new ArenaBots(ctx, this);
     this.panel = document.createElement('div'); this.panel.className = 'objective-hud'; this.panel.hidden = true; ctx.hud.root.appendChild(this.panel);
+    this.spectatorPanel = document.createElement('div'); this.spectatorPanel.className = 'spectator-hud'; this.spectatorPanel.hidden = true; ctx.hud.root.appendChild(this.spectatorPanel);
     this.marker = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.18, 0.3), makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' })); this.marker.visible = false; ctx.scene.add(this.marker);
     this.net.on('combatstate', (d, from) => { if (!this.net.isHost && from === this.net.hostId && this.active()) this.receive(d); });
     this.net.on('objective', (d, from) => { if (this.net.isHost) this.intent(from, d); });
@@ -30,7 +32,8 @@ export class TeamMatch {
       a.protectedUntil = 0; this.publish(true);
     });
     this.net.on('botps', (d, from) => {
-      if (this.net.isHost || from !== this.net.hostId || !this.actor(d.id)?.bot) return;
+      const a = this.actor(d.id);
+      if (this.net.isHost || from !== this.net.hostId || !a?.bot || d.round !== this.state?.round || d.life !== a.life) return;
       const r = this.remote.get(d.id); if (r) { r.push(d.ps, performance.now() / 1000); r.lastSeen = performance.now(); }
     });
   }
@@ -41,7 +44,8 @@ export class TeamMatch {
   team(id) { return this.actor(id)?.team ?? this.lobby.players.get(id)?.team ?? 0; }
   canFight() { return !this.active() || this.state?.phase === 'live'; }
   canHurt(id, target) { return this.state?.phase === 'live' && this.team(id) !== this.team(target) && this.actor(target)?.alive && this.actor(target).protectedUntil <= this.now(); }
-  clear() { this.state = null; this.appliedRound = null; this.explosionRound = null; this.applied.clear(); this.intents.clear(); this.panel.hidden = true; this.marker.visible = false; this.bots.clear?.(); this.ctx.touch?.setObjective?.(false, null, false); this.ctx.hud.root.classList.remove('team-game'); }
+  clear() { this.restoreSpectator(); this.state = null; this.appliedRound = null; this.explosionRound = null; this.applied.clear(); this.intents.clear(); this.resetObjectiveInput(); this.panel.hidden = true; this.marker.visible = false; this.bots.clear?.(); this.ctx.touch?.setObjective?.(false, null, false); this.ctx.hud.root.classList.remove('team-game', 'team-dead'); }
+  resetObjectiveInput() { this.objectiveSeq = this.ctx.input.holdEventSeq; this.objectiveHeld = false; this.intentAt = 0; this.lastObjectiveInput = null; }
   start() {
     this.applied.clear(); this.intents.clear(); this.state = { mode: this.ctx.game.mode, round: 0, phase: 'warmup', endsAt: 0, attackTeam: 0, points: [0, 0], actors: [], bomb: null, interaction: null, reason: '', winner: null };
     this.nextRound();
@@ -72,7 +76,7 @@ export class TeamMatch {
     if (!force && this.now() < this.syncAt) return;
     this.syncAt = this.now() + 250;
     this.applyState();
-    for (const a of this.state.actors) { const b = this.body(a.id); if (b && !a.bot && a.alive) { a.hp = b.hp; a.ps = encodeLocal(b, b.weaponIndex); } }
+    for (const a of this.state.actors) { const b = this.body(a.id); if (b && !a.bot && a.alive) { a.hp = b.hp; a.ps = encodeLocal(b, b.weaponIndex, { round: this.state.round, life: a.life }); } }
     this.net.send('combatstate', this.state);
   }
   receive(d) {
@@ -84,7 +88,7 @@ export class TeamMatch {
     const s = this.state, P = this.ctx.player, game = this.ctx.game;
     if (!s) return;
     if (this.appliedRound !== s.round) {
-      this.appliedRound = s.round; this.clearRound?.(); P.clearNades(); this.ctx.bullets.clear(); this.intents.clear(); this.bots.clear?.();
+      this.appliedRound = s.round; this.restoreSpectator(); this.resetObjectiveInput(); this.clearRound?.(); P.clearNades(); this.ctx.bullets.clear(); this.intents.clear(); this.bots.clear?.();
       this.ctx.hud.message(ts(s.mode === 'tdm' ? 'TEAM DEATHMATCH' : 'DEMOLITION'), s.mode === 'demolition' ? ts('ROUND {} - {}', s.round, ts(this.team(this.net.id) === s.attackTeam ? 'ATTACK' : 'DEFEND')) : ts('First to 50 - 8 minutes'), 2.5);
     }
     for (const a of s.actors) {
@@ -93,6 +97,7 @@ export class TeamMatch {
       if (this.applied.get(a.id) !== a.life) {
         this.applied.set(a.id, a.life);
         if (a.id === this.net.id && a.alive) {
+          this.restoreSpectator(); this.resetObjectiveInput(); this.ctx.hud.root.classList.remove('team-dead');
           P.reset(vec(a.spawn), s.mode === 'tdm'); P.yaw = a.yaw; P.pitch = 0; P.hp = a.hp; P.maxHp = 110; P.lastHitBy = null; P.lastHit = null; game.state = 'play';
           P.regenRate = s.mode === 'demolition' ? 0 : P.regenRate;
           P._resetGrenadeInput();
@@ -132,7 +137,7 @@ export class TeamMatch {
     this.sendScores(); this.publish(true); return true;
   }
   damageBot(d) {
-    const a = this.actor(d.id); if (!this.net.isHost || !a?.bot || !a.alive || this.state.phase !== 'live' || d.round !== this.state.round) return;
+    const a = this.actor(d.id); if (!this.net.isHost || !a?.bot || !a.alive || this.state.phase !== 'live' || d.round !== this.state.round || d.life !== a.life) return;
     a.hp = Math.max(0, a.hp - d.amount); const b = this.body(a.id); if (b) b.hp = a.hp;
     if (!a.hp && this.death(a.id, d.by, a.life, d.round)) {
       b?.ragdoll(d.from ? b.center.clone().sub(vec(d.from)).normalize() : null, d.amount >= 90);
@@ -142,8 +147,20 @@ export class TeamMatch {
   }
   intent(id, d) {
     const a = this.actor(id); if (!this.net.isHost || !a || !d || d.round !== this.state?.round || d.life !== a.life) return;
-    const now = this.now();
-    this.intents.set(id, { ...d, releasedAt: Number.isFinite(d.releasedAt) ? Math.min(now, Math.max(now - 1500, d.releasedAt)) : null, seen: now });
+    const now = this.now(), prev = this.intents.get(id);
+    if (Number.isSafeInteger(d.serial) && Number.isSafeInteger(prev?.serial) && d.serial <= prev.serial) return;
+    const intent = { ...d, releasedAt: Number.isFinite(d.releasedAt) ? Math.min(now, d.releasedAt) : null, seen: now };
+    this.intents.set(id, intent);
+    const pending = this.state.interaction;
+    if (pending?.id !== id) return;
+    // Process releases when they arrive, before a later press can overwrite the held state.
+    // A release after the deadline still finishes a hold that was valid for its full duration.
+    if (!intent.held || intent.moving || intent.attacking || (intent.hold != null && pending.hold != null && intent.hold !== pending.hold)) {
+      const action = this.actionFor(id);
+      if (!intent.held && !intent.moving && !intent.attacking && intent.releasedAt >= pending.endsAt && action?.kind === pending.kind && this.body(id).body.pos.distanceTo(vec(pending.pos)) <= .55) this.completeInteraction(pending, now);
+      if (this.state.interaction === pending) this.state.interaction = null;
+      this.publish(true);
+    }
   }
   actionFor(id) {
     const s = this.state, a = this.actor(id), b = this.body(id); if (!a?.alive || !b || s.mode !== 'demolition' || s.phase !== 'live') return null;
@@ -157,8 +174,32 @@ export class TeamMatch {
   }
   dropBomb(id) {
     const b = this.state?.bomb; if (!b || b.status !== 'carried' || b.carrier !== id) return;
-    const p = this.body(id)?.body.pos || vec(this.actor(id)?.spawn || [0, 0, 0]);
+    const a = this.actor(id), raw = this.body(id)?.body.pos || vec(a?.spawn || [0, 0, 0]);
+    const p = this.bombDropPoint(raw, a);
     b.status = 'dropped'; b.carrier = null; b.pos = p.toArray(); b.pickupAfter = this.now() + 900; this.state.interaction = null; this.publish(true);
+  }
+  bombDropPoint(raw, actor) {
+    const { world, nav, level } = this.ctx, base = level.teamSpawns[0][0];
+    // Drop onto a reachable walking surface; an airborne death must not strand C4 in the sky
+    // or on an isolated prop. The assigned spawn remains a valid fallback outside the map.
+    for (const source of [raw, actor?.spawn && vec(actor.spawn), base].filter(Boolean)) {
+      const hit = world.raycast(source.clone().add(new THREE.Vector3(0, .4, 0)), new THREE.Vector3(0, -1, 0), 200);
+      if (!hit || hit.normal.y < .5) continue;
+      const node = nav.nodes[nav.nearestNode(hit.point, 3, 2, true)];
+      if (!node || node.iso || Math.abs(node.y - hit.point.y) > 1 || Math.hypot(node.x - hit.point.x, node.z - hit.point.z) > 3) continue;
+      const reachable = new THREE.Vector3(node.x, node.y, node.z);
+      if (!nav.findPath(base, reachable)) continue;
+      if (world.hasLineOfSight(hit.point.clone().add(new THREE.Vector3(0, .3, 0)), reachable.clone().add(new THREE.Vector3(0, .3, 0)))) return hit.point;
+      return reachable;
+    }
+    return base.clone();
+  }
+  completeInteraction(interaction, now) {
+    const s = this.state, bomb = s.bomb;
+    if (s.phase !== 'live' || !bomb || now < interaction.endsAt || (bomb.status === 'planted' && interaction.endsAt >= bomb.explodeAt)) return;
+    if (interaction.kind === 'plant' && interaction.endsAt <= s.endsAt) {
+      bomb.status = 'planted'; bomb.carrier = null; bomb.pos = [...interaction.pos]; bomb.site = interaction.site; bomb.explodeAt = interaction.endsAt + MATCH_RULES.fuse; s.interaction = null;
+    } else if (interaction.kind === 'defuse') this.roundWin(1 - s.attackTeam, 'BOMB DEFUSED');
   }
   roundWin(team, reason) {
     const s = this.state; if (s.phase !== 'live') return;
@@ -204,12 +245,10 @@ export class TeamMatch {
       const action = valid({ id: interaction.id }, interaction);
       if (!action || action.kind !== interaction.kind || this.body(interaction.id).body.pos.distanceTo(vec(interaction.pos)) > 0.55) s.interaction = interaction = null;
     }
-    if (!interaction) for (const a of s.actors) { const action = valid(a); if (action) { s.interaction = interaction = { id: a.id, ...action, startedAt: now, endsAt: now + action.duration }; break; } }
+    if (!interaction) for (const a of s.actors) { const action = valid(a); if (action) { s.interaction = interaction = { id: a.id, hold: this.intents.get(a.id)?.hold, ...action, startedAt: now, endsAt: now + action.duration }; break; } }
     // Absolute completion times settle near-simultaneous defuses/explosions identically at every FPS.
-    if (interaction && now >= interaction.endsAt && (bomb.status !== 'planted' || interaction.endsAt < bomb.explodeAt)) {
-      if (interaction.kind === 'plant' && interaction.endsAt <= s.endsAt) { bomb.status = 'planted'; bomb.carrier = null; bomb.pos = [...interaction.pos]; bomb.site = interaction.site; bomb.explodeAt = interaction.endsAt + MATCH_RULES.fuse; s.interaction = null; }
-      else if (interaction.kind === 'defuse') { this.roundWin(1 - s.attackTeam, 'BOMB DEFUSED'); return; }
-    }
+    if (interaction) this.completeInteraction(interaction, now);
+    if (s.phase !== 'live') return;
     if (bomb?.status === 'planted' && now >= bomb.explodeAt) { this.roundWin(s.attackTeam, 'BOMB EXPLODED'); return; }
     const alive = [0, 1].map((team) => s.actors.filter((a) => a.team === team && a.alive).length);
     if (!alive[1 - s.attackTeam]) { this.roundWin(s.attackTeam, 'DEFENDERS ELIMINATED'); return; }
@@ -217,7 +256,7 @@ export class TeamMatch {
     if (bomb?.status !== 'planted' && now >= s.endsAt) this.roundWin(1 - s.attackTeam, 'TIME EXPIRED');
   }
   update(dt) {
-    if (!this.active() || !this.state) { this.panel.hidden = true; this.marker.visible = false; return; }
+    if (!this.active() || !this.state) { this.restoreSpectator(); this.panel.hidden = true; this.marker.visible = false; return; }
     const s = this.state, inp = this.ctx.input, p = this.ctx.player, mine = this.actor(this.net.id), now = this.now();
     if (s.phase === 'live' && mine?.alive && this.applied.get(this.net.id) === mine.life && !p.alive && now >= (this.deathRetryAt || 0)) {
       this.deathRetryAt = now + 750;
@@ -227,15 +266,32 @@ export class TeamMatch {
     if (s.phase === 'live' && mine?.alive && !this.ctx.game.menu && (p.firing || p._nadeHeld || inp.down('fire') || inp.down('grenade') || inp.down('melee')) && mine.protectedUntil > now) {
       mine.protectedUntil = 0; p.shieldT = 0; this.net.send('unshield', { round: s.round, life: mine.life });
     }
-    if (mine && now >= this.intentAt) {
-      this.intentAt = now + 150;
-      const timing = inp.holdTiming('interact');
-      const data = { held: !this.ctx.game.menu && inp.down('interact'), releasedAt: !this.ctx.game.menu && timing?.end != null ? now - Math.max(0, performance.now() - timing.end) : null, moving: Math.abs(inp.move.x) + Math.abs(inp.move.y) > .1, attacking: inp.down('fire') || inp.down('grenade') || inp.down('melee') || p._nadeHeld, round: s.round, life: mine.life };
-      if (this.net.isHost) this.intent(this.net.id, data); else this.net.send('objective', data);
-    }
+    if (mine) this.updateObjectiveInput(mine, now);
     if (inp.pressed('bombDrop') && !this.ctx.game.menu) { if (this.net.isHost) this.dropBomb(this.net.id); else this.net.send('bombdrop', { round: s.round }); }
     if (this.net.isHost) { this.bots.update(dt); this.hostTick(); this.publish(); }
-    this.renderHUD(); this.spectate(dt);
+    this.spectate(dt); this.renderHUD();
+  }
+  updateObjectiveInput(mine, now) {
+    const inp = this.ctx.input, p = this.ctx.player, enabled = mine.alive && !this.ctx.game.menu && this.state.phase === 'live';
+    const flags = { moving: Math.abs(inp.move.x) + Math.abs(inp.move.y) > .1, attacking: !!(inp.down('fire') || inp.down('grenade') || inp.down('melee') || p._nadeHeld) };
+    const send = (held, releasedAt = null) => {
+      if (held && !this.objectiveHeld) this.objectiveHold++;
+      this.objectiveHeld = held;
+      const data = { held, releasedAt, hold: this.objectiveHold, serial: ++this.objectiveSerial, ...flags, round: this.state.round, life: mine.life };
+      if (this.net.isHost) this.intent(this.net.id, data); else this.net.send('objective', data);
+      this.lastObjectiveInput = `${held}|${flags.moving}|${flags.attacking}`; this.intentAt = now + 150;
+    };
+    const stamp = performance.now();
+    for (const event of inp.holdEventsAfter(this.objectiveSeq, stamp)) {
+      this.objectiveSeq = event.seq;
+      if (event.action !== 'interact') continue;
+      send(!!(enabled && event.down), !event.down ? now - Math.max(0, stamp - event.time) : null);
+    }
+    const held = !!(enabled && inp.down('interact')), state = `${held}|${flags.moving}|${flags.attacking}`;
+    if (state !== this.lastObjectiveInput || now >= this.intentAt) {
+      const timing = inp.holdTiming('interact');
+      send(held, !held && timing?.end != null ? now - Math.max(0, stamp - timing.end) : null);
+    }
   }
   renderHUD() {
     const s = this.state, now = this.now(), mine = this.actor(this.net.id), bomb = s.bomb, action = this.actionFor(this.net.id), interaction = s.interaction;
@@ -252,7 +308,7 @@ export class TeamMatch {
     if (s.phase === 'warmup') hint = ts('GET READY - {}', Math.max(0, Math.ceil((s.endsAt - now) / 1000)));
     if (s.phase === 'roundover') hint = ts(TEAM_NAMES[s.winner]) + ' - ' + ts(s.reason);
     const progress = interaction?.id === this.net.id ? Math.min(1, Math.max(0, (now - interaction.startedAt) / interaction.duration)) : 0;
-    this.ctx.hud.root.classList.add('team-game'); this.panel.hidden = this.ctx.game.menu || s.phase === 'over';
+    this.ctx.hud.root.classList.add('team-game'); this.ctx.hud.root.classList.toggle('team-dead', !mine?.alive); this.panel.hidden = this.ctx.game.menu || s.phase === 'over';
     const safeHint = hint.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     const html = `<div class="team-totals"><span class="blue">${ts('BLUE TEAM')} <b>${s.points[0]}</b></span><small>${role}</small><span class="orange"><b>${s.points[1]}</b> ${ts('ORANGE TEAM')}</span></div><div class="objective-hint">${safeHint}</div>${progress ? `<div class="objective-progress"><i style="width:${progress * 100}%"></i></div>` : ''}`;
     if (html !== this._html) { this.panel.innerHTML = html; this._html = html; }
@@ -263,11 +319,32 @@ export class TeamMatch {
     this.ctx.touch?.setObjective?.(!!action && !!mine?.alive && s.phase === 'live', action?.kind, bomb?.carrier === this.net.id && mine?.alive);
   }
   spectate(dt) {
-    if (this.state.mode !== 'demolition' || this.actor(this.net.id)?.alive || this.ctx.game.menu) return;
-    const mates = this.state.actors.filter((a) => a.id !== this.net.id && a.alive && a.team === this.team(this.net.id));
-    if (!mates.length) return;
-    if (this.ctx.input.pressed('fire')) this.spectator++;
-    const b = this.body(mates[this.spectator % mates.length].id); if (!b) return;
-    this.ctx.camera.position.copy(b.eye); this.ctx.camera.rotation.set(b.pitch, b.yaw, 0, 'YXZ'); this.ctx.camera.updateMatrixWorld(); this.ctx.player.rig.visible = false;
+    if (this.state.mode !== 'demolition' || this.actor(this.net.id)?.alive || this.ctx.game.menu || this.state.phase === 'over') { this.restoreSpectator(); return; }
+    const mates = this.state.actors.filter((a) => a.id !== this.net.id && a.alive && a.team === this.team(this.net.id) && this.body(a.id));
+    const oldIndex = mates.findIndex((a) => a.id === this.spectatedId);
+    this.spectator = oldIndex < 0 ? 0 : oldIndex;
+    if (this.ctx.input.pressed('fire') && mates.length) this.spectator = (this.spectator + 1) % mates.length;
+    const actor = mates[this.spectator], b = actor && this.body(actor.id);
+    if (this.spectatedId !== actor?.id || this.hiddenSpectator?.root !== b?.root) this.restoreSpectator();
+    this.ctx.hud.root.classList.add('spectating'); this.spectatorPanel.hidden = false;
+    for (const el of this.ctx.touch?.btnEls.fire || []) el.dataset.spectateLabel = ts('NEXT TEAMMATE');
+    this.ctx.player.rig.visible = false;
+    if (!b) { this.spectatorPanel.textContent = ts('No surviving teammates - waiting for next round'); return; }
+    this.spectatedId = actor.id;
+    if (!this.hiddenSpectator) this.hiddenSpectator = { body: b, root: b.root, visible: b.root?.visible, tagVisibility: b.nameTag?.style.visibility || '' };
+    if (b.root) b.root.visible = false;
+    if (b.nameTag) b.nameTag.style.visibility = 'hidden';
+    this.ctx.camera.position.copy(b.eye); this.ctx.camera.rotation.set(b.pitch, b.yaw, 0, 'YXZ'); this.ctx.camera.updateMatrixWorld();
+    const hp = Math.max(0, Math.ceil(b.hp ?? actor.hp ?? 0));
+    this.spectatorPanel.textContent = ts('SPECTATING {} - {} HP', this.lobby.players.get(actor.id)?.name || b.name, hp) + ' · ' + ts(this.ctx.input.usingTouch ? 'Tap NEXT to switch teammates' : this.ctx.input.usingGamepad ? 'R2 switches teammates' : 'Left click switches teammates');
+  }
+  restoreSpectator() {
+    const hidden = this.hiddenSpectator;
+    if (hidden) {
+      if (hidden.root && hidden.root === hidden.body.root) hidden.root.visible = !!hidden.visible && !hidden.body.away;
+      if (hidden.body.nameTag) hidden.body.nameTag.style.visibility = hidden.tagVisibility;
+    }
+    this.hiddenSpectator = null; this.spectatedId = null;
+    this.spectatorPanel.hidden = true; this.ctx.hud.root.classList.remove('spectating');
   }
 }

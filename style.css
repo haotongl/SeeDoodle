@@ -333,6 +333,16 @@ body.touch, body.touch #c { overscroll-behavior: none; touch-action: none; -webk
 .b-bomb-drop { left: calc(43% - 72px); bottom: calc(152px + var(--sab)); width: 62px; height: 32px; font-size: 10px; }
 #hud.team-game .hud-tl, #hud.team-game .hud-tr .wave, #hud.team-game .hud-tr .left { display: none; }
 #hud.nogame .objective-hud { display: none; }
+#hud.team-dead .hud-bl, #hud.team-dead .hud-br, #hud.team-dead .crosshair, #hud.team-dead .scope,
+#hud.team-dead .cyc, #hud.team-dead .nade-state, #hud.team-dead .grapple-ret, #hud.team-dead .gstam,
+#hud.team-dead .focus-meter, #hud.team-dead .focus-mark, #hud.team-dead .hitmarker, #hud.team-dead .dmg-ind, #hud.team-dead .tip,
+#hud.team-dead .tc-stick, #hud.team-dead .tb:not(.b-pause):not(.b-score):not(.b-fire),
+#hud.team-dead:not(.spectating) .b-fire { display: none !important; }
+#hud.spectating .b-fire { font-size: 0; }
+#hud.spectating .b-fire::after { content: attr(data-spectate-label); font-size: 12px; }
+.spectator-hud { position: absolute; bottom: max(26px, env(safe-area-inset-bottom)); left: 50%; transform: translateX(-50%); max-width: 65vw; padding: 6px 10px; color: #e7edf0; background: rgba(23,34,42,.22); border-radius: 5px; font-size: 12px; line-height: 1.5; text-align: center; text-shadow: 0 1px 3px rgba(0,0,0,.65); pointer-events: none; }
+.spectator-hud[hidden], #hud.nogame .spectator-hud { display: none; }
+#hud.touch .spectator-hud { max-width: 52vw; font-size: 10px; }
 .team-lobby { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 15px 0; }
 .team-lobby section { padding: 12px; border-radius: 8px; background: rgba(100, 135, 155, .1); min-width: 0; }
 .team-lobby section.team-1 { background: rgba(220, 162, 64, .1); }

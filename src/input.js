@@ -10,7 +10,7 @@ const KEYMAP = {
 const MOUSEMAP = { 0: 'fire', 2: 'aim', 1: 'grapple', 3: 'grapple', 4: 'melee' };
 // Standard gamepad mapping (DualSense): 0 cross,1 circle,2 square,3 triangle,4 L1,5 R1,6 L2,7 R2,8 create,9 options,10 L3,11 R3,12-15 dpad
 const PADMAP = { 0: 'jump', 1: 'crouch', 2: 'reload', 3: 'nextWeapon', 4: 'grapple', 5: 'melee', 6: 'aim', 7: 'fire', 9: 'pause', 10: 'sprint', 11: 'grenade', 12: 'grenade', 13: 'slot5', 14: 'prevWeapon', 15: 'nextWeapon', 8: 'score', 17: 'confirm' };
-const GRENADE_ACTIONS = new Set(['fire', 'grenade', 'reload', 'aim', 'melee', 'nadeCancel']);
+const TIMED_ACTIONS = new Set(['fire', 'grenade', 'reload', 'aim', 'melee', 'nadeCancel', 'interact']);
 
 export class Input {
   constructor(canvas) {
@@ -156,8 +156,8 @@ export class Input {
     const now = performance.now();
     if (held) this.holdTimes[a] = { start: now, end: null, held: true };
     else if (this.holdTimes[a]) { this.holdTimes[a].end = now; this.holdTimes[a].held = false; }
-    // Retain event order across sparse frames, including two pin taps or pin then blur.
-    if (GRENADE_ACTIONS.has(a)) {
+    // A release and re-press between frames must interrupt both grenades and objective holds.
+    if (TIMED_ACTIONS.has(a)) {
       this.holdEvents.push({ action: a, down: held, time: now, seq: ++this.holdEventSeq });
       if (this.holdEvents.length > 256) this.holdEvents.splice(0, this.holdEvents.length - 256);
     }

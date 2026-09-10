@@ -10,6 +10,7 @@ const point = (p) => Array.isArray(p) ? new THREE.Vector3().fromArray(p) : p?.is
 const distanceXZ = (a, b) => Math.hypot(a.x - b.x, a.z - b.z);
 const weaponIndex = (rule) => rule === 'knives' ? 3 : rule === 'grenades' ? 5 : 0;
 const random = (lo, hi) => lo + Math.random() * (hi - lo);
+const RIFLE_SPEED = 330, RIFLE_RANGE = 65;
 
 export class ArenaBots {
   constructor(ctx, match) {
@@ -24,7 +25,7 @@ export class ArenaBots {
       if (!n.charged || !n.botLaunch || n.expiresAt <= this.match.now() || !this.match.actor(n.owner)?.bot || n.round !== this.match.state.round) continue;
       // Reconnect may retry a registration, but never turns the current in-flight position into
       // a fresh launch or replenishes a fuse. The server deduplicates the unchanged grenade id.
-      this.match.net.send('botnade', { id: n.owner, nade: n.botLaunch, round: n.round }); sent++;
+      this.match.net.send('botnade', { id: n.owner, nade: n.botLaunch, round: n.round, life: n.life ?? n.botLaunch.life }); sent++;
     }
     return sent;
   }
@@ -142,18 +143,69 @@ export class ArenaBots {
     sim.lastPos.copy(b.pos);
     return atGoal && Math.hypot(b.vel.x, b.vel.z) < 0.35;
   }
-  _visualShot(actor, sim, kind, origin, end, now) {
+  _visualShot(actor, sim, kind, origin, end, now, ballistic = false) {
     if (actor.protectedUntil > now) {
       actor.protectedUntil = 0;
       this.match.net.send('unshield', { id: actor.id, round: this.match.state.round, life: actor.life });
     }
     sim.firedUntil = now + 120;
     const ink = actor.team === 0 ? INK.BLUE : INK.ORANGE;
-    if (kind !== 'katana') this.ctx.effects.tracer(origin, end, ink, 0.02, 0.1);
+    if (kind !== 'katana' && !ballistic) this.ctx.effects.tracer(origin, end, ink, 0.02, 0.1);
     this.ctx.effects.strokeBurst(origin, ink, 4, 3, { life: 0.09, size: 0.03 });
     if (kind === 'katana') this.ctx.audio?.noise?.({ dur: 0.2, gain: 0.35, type: 'bandpass', freq: 500, freqEnd: 3000, q: 1.5, pos: origin });
     else this.ctx.audio?.remoteShot?.(kind, origin);
-    this.match.net.send('botshots', { id: actor.id, k: kind, o: origin.toArray(), e: end.toArray(), round: this.match.state.round });
+    this.match.net.send('botshots', { id: actor.id, k: kind, o: origin.toArray(), e: end.toArray(), round: this.match.state.round, life: actor.life, ...(ballistic ? { bal: true, mv: RIFLE_SPEED } : {}) });
+  }
+  _guardFeedback(target, origin, melee = false, by = null) {
+    const body = this.match.body(target.id), at = body.eye.clone().addScaledVector(body.forward, 0.5);
+    if (target.id === this.match.net.id && melee) body.tryBlockMelee({ center: origin });
+    else {
+      this.ctx.effects.strokeBurst(at, INK.ORANGE, 10, 6, { life: 0.25, size: 0.04 });
+      this.ctx.audio.shieldHit(body.center);
+      if (target.id !== this.match.net.id) this.match.net.sendTo(target.id, 'parry', { ret: false, by, round: this.match.state.round, life: target.life, targetLife: target.life });
+      else { this.ctx.input.rumble(0.4, 0.4, 75); body.weapon.onDeflect?.(false); }
+    }
+  }
+  _parries(target, origin) {
+    const body = this.match.body(target.id);
+    return !!(body?.parryWindow && body.isBlocking && origin.clone().sub(body.center).normalize().dot(body.forward) > 0.6);
+  }
+  _rifleHit(origin, dir, range, shot) {
+    let best = null;
+    for (const actor of this.match.state.actors) {
+      if (actor.id === shot.id || actor.team === shot.team || !actor.alive || actor.protectedUntil > this.match.now() || actor.life !== shot.lives.get(actor.id)) continue;
+      const body = this.match.body(actor.id); if (!body) continue;
+      const sphere = (center, radius, part) => {
+        const offset = center.clone().sub(origin), along = offset.dot(dir), away = offset.lengthSq() - along * along;
+        if (away > radius * radius) return;
+        const entry = along - Math.sqrt(Math.max(0, radius * radius - away));
+        if (entry < 0 || entry > range || (best && entry >= best.dist)) return;
+        best = { actor, body, part, dist: entry, point: origin.clone().addScaledVector(dir, entry) };
+      };
+      if (body.hitSpheres) for (let i = 0; i < body.hit.length; i++) sphere(body.hitSpheres[i], body.hit[i][1], body.hit[i][0]);
+      else {
+        sphere(body.eye, 0.3, 'head'); sphere(body.center, 0.33, 'torso');
+        sphere(body.body.pos.clone().add(new THREE.Vector3(0, body.body.height * 0.45, 0)), 0.2, 'hips');
+      }
+      if (body.isBlocking) sphere(body.center.clone().addScaledVector(body.forward, 0.5).add(new THREE.Vector3(0, 0.3, 0)), 0.42, 'blade');
+    }
+    return best;
+  }
+  _resolveRifle(shot, origin, dir, range, travelled = 0, muzzle = origin, flight = 0) {
+    const match = this.match, actor = match.actor(shot.id);
+    if (!match.net.isHost || match.state?.round !== shot.round || !match.canFight() || !actor?.alive || actor.life !== shot.life) return { stopped: true, hit: false };
+    const wall = this.ctx.world.raycast(origin, dir, range, SEE_THROUGH), hit = this._rifleHit(origin, dir, range, shot);
+    if (wall && (!hit || wall.dist <= hit.dist)) { this.ctx.effects.bulletImpact(wall.point, wall.normal, shot.ink); return { stopped: true, hit: false }; }
+    if (!hit) return { stopped: false, hit: false };
+    if (hit.part === 'blade') { this._guardFeedback(hit.actor, muzzle, false, shot.id); return { stopped: true, hit: false }; }
+    const claim = { id: shot.id, to: hit.actor.id, k: 'rifle', dmg: 19, round: shot.round, life: shot.life, targetLife: hit.actor.life,
+      o: muzzle.toArray(), r: travelled + hit.dist };
+    if (flight > 0) Object.assign(claim, { ft: flight, p: hit.point.toArray() });
+    else claim.d = dir.toArray();
+    match.net.send('bothit', claim);
+    this.ctx.effects.blood(hit.point, dir, 0.6, { ink: INK.RED });
+    hit.body.flash?.();
+    return { stopped: true, hit: true };
   }
   _attack(actor, sim, target, dt, now) {
     if (!target || !this._visible(sim, target, now)) { sim.chargeAt = null; return; }
@@ -168,7 +220,10 @@ export class ArenaBots {
       if (now - sim.chargeAt < 800) return;
       sim.chargeAt = null; sim.fireAt = now + 750;
       this._visualShot(actor, sim, 'katana', sim.eye, aim, now);
-      if (distance < 3.2) this.match.net.send('bothit', { id: actor.id, to: target.id, k: 'katana', charge: 1, dmg: 165, round: this.match.state.round });
+      if (distance < 3.2) {
+        if (this._parries(target, sim.eye)) { this._guardFeedback(target, sim.eye, true, actor.id); sim.fireAt = now + 900; }
+        else this.match.net.send('bothit', { id: actor.id, to: target.id, k: 'katana', charge: 1, dmg: 165, round: this.match.state.round, life: actor.life, targetLife: target.life });
+      }
       return;
     }
     if (now < sim.fireAt || now - sim.acquiredAt < 500 || distance > 65) return;
@@ -177,9 +232,17 @@ export class ArenaBots {
     const hit = Math.random() < clamp(0.8 - distance * 0.009, 0.22, 0.74);
     const end = aim.clone();
     if (!hit) { end.x += random(0.8, 1.9) * sim.side; end.y += random(-0.6, 0.9); }
-    const dir = end.clone().sub(sim.eye).normalize(), wall = this.ctx.world.raycast(sim.eye, dir, distance + 3, SEE_THROUGH);
-    this._visualShot(actor, sim, 'rifle', sim.eye, wall && wall.dist < distance ? wall.point : end, now);
-    if (hit && (!wall || wall.dist >= distance)) this.match.net.send('bothit', { id: actor.id, to: target.id, k: 'rifle', dmg: 19, o: sim.eye.toArray(), d: dir.toArray(), r: distance + 1, round: this.match.state.round });
+    const dir = end.clone().sub(sim.eye).normalize(), ballistic = !!this.ctx.ballistics?.();
+    const shot = { id: actor.id, life: actor.life, round: this.match.state.round, team: actor.team, ink: actor.team === 0 ? INK.BLUE : INK.ORANGE,
+      lives: new Map(this.match.state.actors.map((a) => [a.id, a.life])) };
+    const wall = !ballistic && this.ctx.world.raycast(sim.eye, dir, distance, SEE_THROUGH);
+    this._visualShot(actor, sim, 'rifle', sim.eye, wall ? wall.point : end, now, ballistic);
+    if (ballistic) {
+      // Share the player's flight integrator and collision steps. Suppress its local-player
+      // announcement: botshots above carries the actual shooter and identical launch vector.
+      const gun = { kind: 'rifle', resolveShot: (...args) => this._resolveRifle(shot, ...args) };
+      this.ctx.bullets.fire(gun, sim.eye, dir, { mv: RIFLE_SPEED, maxRange: RIFLE_RANGE, ink: shot.ink, notify: false });
+    } else this._resolveRifle(shot, sim.eye, dir, RIFLE_RANGE);
   }
   _grenade(actor, sim, aim, now) {
     if (actor.protectedUntil > now) {
@@ -191,17 +254,17 @@ export class ArenaBots {
     if (vel.length() > 65) vel.multiplyScalar(65 / vel.length());
     // Use the same seven-second fuse and bouncing projectile as a human throw, so a grenade
     // remains visible, dodgeable and live after its thrower dies.
-    const packet = { id: `${actor.id.slice(0, 36)}:${actor.life}:${this.nonce}:${++this.sequence}`, charged: true, phase: 'thrown', pos: pos.toArray(), vel: vel.toArray(), expiresAt: now + 7000, thrownAt: now };
+    const packet = { id: `${actor.id.slice(0, 36)}:${actor.life}:${this.nonce}:${++this.sequence}`, charged: true, phase: 'thrown', pos: pos.toArray(), vel: vel.toArray(), expiresAt: now + 7000, thrownAt: now, life: actor.life, round: this.match.state.round };
     this._publish(actor, sim, now, true);
-    this.match.net.send('botnade', { id: actor.id, nade: packet, round: this.match.state.round });
+    this.match.net.send('botnade', { id: actor.id, nade: packet, round: this.match.state.round, life: actor.life });
     this.ctx.player.receiveGrenade(packet, actor.id);
     const nade = this.ctx.player.nades.find((n) => n.owner === actor.id && n.id === packet.id);
-    if (nade) { nade.mine = true; nade.bot = true; nade.round = this.match.state.round; nade.thrownAt = now; nade.botLaunch = packet; }
+    if (nade) { nade.mine = true; nade.bot = true; nade.round = this.match.state.round; nade.life = actor.life; nade.thrownAt = now; nade.botLaunch = packet; }
     sim.firedUntil = now + 250; sim.grenadeAt = now + random(3600, 5200);
   }
   _publish(actor, sim, now, force = false) {
     sim.hp = actor.hp; sim.alive = actor.alive;
-    const ps = encodeLocal(sim, weaponIndex(this.match.lobby.weaponMode), { firing: now < sim.firedUntil });
+    const ps = encodeLocal(sim, weaponIndex(this.match.lobby.weaponMode), { firing: now < sim.firedUntil, round: this.match.state.round, life: actor.life });
     actor.ps = ps;
     const remote = this.match.remote.get(actor.id);
     // The host already has this body's current position. Interpolating it a second time would

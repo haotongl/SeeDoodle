@@ -113,6 +113,8 @@ let screen = 'main';           // which start-screen panel is showing: main | on
 ctx.touch = touch;
 const match = ctx.match = new TeamMatch(ctx, { net, lobby, remote, scores, sendScores, endMatch, clearRound: () => localNadeAnnouncements.clear() });
 window.__game = { ctx, game, player, enemies, nav, world, level, hud, effects, input, net, remote, lobby, scores, match };
+function localSnapshot(extra = {}) { return encodeLocal(player, player.weaponIndex, { ...extra, ...(teamMode() ? { round: match.state?.round, life: match.applied.get(net.id) } : {}) }); }
+function combatClaim(target, owner = net.id, life = match.actor(owner)?.life) { return teamMode() ? { round: match.state?.round, life, targetLife: match.actor(target)?.life } : {}; }
 
 // Whose call it is, following the map: alone it is your own setting, in a lobby it is the host's,
 // so everybody in a match is shooting the same physics.
@@ -156,7 +158,7 @@ ctx.raycastPlayers = (o, d, maxDist) => {
   }
   return best;
 };
-const _bc = new THREE.Vector3();
+const _bc = new THREE.Vector3(), _listenerRight = new THREE.Vector3();
 ctx.playersInArc = (pos, dir, range, cosHalf) => { const out = []; for (const t of remote.values()) { if (!t.alive || !ctx.canHurt(t)) continue; _v.subVectors(t.center, pos); const d = _v.length(); if (d > range + 0.3) continue; if (d > 0.3 && _v.normalize().dot(dir) < cosHalf) continue; if (!world.hasLineOfSight(pos, t.center)) continue; out.push(t); } return out; };
 ctx.hitPlayer = (t, dmg, info) => {
   if (!ctx.canHurt(t) || !t.alive) return;
@@ -197,7 +199,7 @@ ctx.hitPlayer = (t, dmg, info) => {
     claim.d = [+info.dir.x.toFixed(4), +info.dir.y.toFixed(4), +info.dir.z.toFixed(4)];
     claim.o = [+(info.point.x - info.dir.x * info.dist).toFixed(2), +(info.point.y - info.dir.y * info.dist).toFixed(2), +(info.point.z - info.dir.z * info.dist).toFixed(2)];
   }
-  net.hit(t.id, { ...claim, ...(teamMode() ? { round: match.state?.round } : {}) });
+  net.hit(t.id, { ...claim, ...combatClaim(t.id) });
 };
 // a slash through another player's rope cuts it: their client drops the hook
 const _rp = new THREE.Vector3(), _rq = new THREE.Vector3();
@@ -252,6 +254,7 @@ ctx.onShot = (end) => { if (net.active && inMatch()) shotQueue.push(+end.x.toFix
 const bulletQueue = [];
 ctx.onBullet = (b) => {
   if (!net.active || !inMatch()) return;
+  if (teamMode()) { b.matchRound = match.state?.round; b.matchLife = match.applied.get(net.id); }
   const mv = b.vel.length();
   bulletQueue.push(+b.origin.x.toFixed(2), +b.origin.y.toFixed(2), +b.origin.z.toFixed(2),
     +(b.vel.x / mv).toFixed(4), +(b.vel.y / mv).toFixed(4), +(b.vel.z / mv).toFixed(4));
@@ -480,15 +483,17 @@ function pruneNadeAnnouncements() {
   const now = ctx.grenadeNow();
   for (const [id, entry] of localNadeAnnouncements) if (entry.d.expiresAt <= now || entry.owner !== net.id) localNadeAnnouncements.delete(id);
 }
-function announceGrenade(d, position = encodeLocal(player, player.weaponIndex)) {
+function announceGrenade(d, position = localSnapshot()) {
   // A quick first throw (or one straight after respawn) can precede the regular position feed.
-  net.broadcast('ps', position); net.broadcast('nade', { ...d, ...(teamMode() ? { round: match.state?.round } : {}) });
+  // Dropping a registered grenade during reset must not label the old body as the new life.
+  if (!teamMode() || (position[14] === d.round && position[15] === d.life)) net.broadcast('ps', position);
+  net.broadcast('nade', d);
 }
 player.onThrow = (d) => {
   if (d.charged && net.connected) {
     pruneNadeAnnouncements();
     d = { ...d, ...(d.phase === 'thrown' ? { thrownAt: d.thrownAt ?? ctx.grenadeNow() } : {}) };
-    if (d.expiresAt > ctx.grenadeNow()) localNadeAnnouncements.set(d.id, { d, position: encodeLocal(player, player.weaponIndex), owner: net.id });
+    if (d.expiresAt > ctx.grenadeNow()) localNadeAnnouncements.set(d.id, { d, position: localSnapshot(), owner: net.id });
     while (localNadeAnnouncements.size > 32) localNadeAnnouncements.delete(localNadeAnnouncements.keys().next().value);
   }
   if (net.active) announceGrenade(d);
@@ -498,7 +503,7 @@ function replayLocalGrenades() {
   // Re-register missed throws using their original launch, then correct peers to the current
   // flight snapshot. Replaying an old armed event must never manufacture a fresh seven seconds.
   for (const entry of localNadeAnnouncements.values()) if (entry.d.phase === 'thrown') announceGrenade(entry.d, entry.position);
-  net.broadcast('ps', encodeLocal(player, player.weaponIndex));
+  net.broadcast('ps', localSnapshot());
   const rows = player.grenadeSnapshot().filter((n) => n.owner === net.id);
   if (rows.length) net.broadcast('nadesync', rows);
 }
@@ -667,7 +672,7 @@ function addRemote(id, name, color, appearance) {
     hud.hitmarker(false, false);
     // A blast is claimed by where it went off, not by a ray - the server checks that they were
     // standing inside it a round trip ago, and that we were near enough to have thrown it.
-    const claim = { k: 'grenade', dmg: Math.round(amount), at, ...(ctx.currentGrenadeId ? { gid: ctx.currentGrenadeId } : {}), ...(teamMode() ? { round: match.state?.round } : {}) };
+    const claim = { k: 'grenade', dmg: Math.round(amount), at, ...(ctx.currentGrenadeId ? { gid: ctx.currentGrenadeId } : {}), ...combatClaim(t.id, ctx.currentGrenadeOwner || net.id, ctx.currentGrenadeLife) };
     if (teamMode() && match.actor(ctx.currentGrenadeOwner)?.bot && net.isHost) net.send('bothit', { id: ctx.currentGrenadeOwner, to: t.id, ...claim }); else net.hit(t.id, claim);
   };
   remote.set(id, rp); return rp;
@@ -894,9 +899,9 @@ net.on('backtolobby', () => { if (!net.isHost) toLobbyScreen(); });
 net.on('pickup', (d) => { if (!net.isHost) spawnPickup(d.kind, new THREE.Vector3().fromArray(d.pos), d.id); });
 net.on('taken', (d) => { const p = pickups.find((x) => x.id === d.id); if (p) removePickup(p); });
 net.on('take', (d) => { if (!net.isHost) return; const p = pickups.find((x) => x.id === d.id); if (p) { removePickup(p); net.send('taken', { id: d.id }); } });
-net.on('ps', (d, from) => { const r = remote.get(from); if (r) { if (teamMode() && match.actor(from)?.alive === false) { d = [...d]; d[6] &= ~64; } r.push(d, performance.now() / 1000); r.lastSeen = performance.now(); } });
+net.on('ps', (d, from) => { const r = remote.get(from); if (r) { if (teamMode()) { if (d[14] !== match.state?.round || d[15] !== match.actor(from)?.life) return; if (match.actor(from)?.alive === false) { d = [...d]; d[6] &= ~64; } } r.push(d, performance.now() / 1000); r.lastSeen = performance.now(); } });
 net.on('pdmg', (d) => {
-  if (!player.alive || game.state !== 'play' || player.shieldT > 0 || (teamMode() && (d.round !== match.state?.round || !match.canFight()))) return; player.lastHitBy = d.by || null; player.lastHit = { from: d.from || null, crit: !!d.crit, amount: d.amount, src: d.src };
+  if (!player.alive || game.state !== 'play' || player.shieldT > 0 || (teamMode() && (d.round !== match.state?.round || d.life !== match.applied.get(net.id) || !match.canFight()))) return; player.lastHitBy = d.by || null; player.lastHit = { from: d.from || null, crit: !!d.crit, amount: d.amount, src: d.src };
   player.takeDamage(d.amount, d.from ? new THREE.Vector3().fromArray(d.from) : null);
 });
 net.on('pdead', (d, from) => {
@@ -910,10 +915,15 @@ net.on('pdead', (d, from) => {
   if (net.isHost && !teamMode()) tallyDeath(from, d.killer);
 });
 net.on('nade', (d, from) => { if (inMatch() && (!teamMode() || d.round === match.state?.round)) player.receiveGrenade(d, from); });
-net.on('botdead', (d, from) => { if (from !== net.hostId || d.round !== match.state?.round || !match.actor(d.id)?.bot) return; const r = remote.get(d.id); if (r) { r.alive = false; r.ragdoll(null, false); } });
-net.on('botshots', (d, from) => { if (from !== net.hostId || !match.actor(d.id)?.bot || !Array.isArray(d.o) || !Array.isArray(d.e)) return; const r = remote.get(d.id); if (d.k === 'katana') audio.katanaSwing(); else { effects.tracer(new THREE.Vector3().fromArray(d.o), new THREE.Vector3().fromArray(d.e), r?.ink ?? INK.BLUE, .02, .08); r?.flash(); audio.remoteShot(d.k, new THREE.Vector3().fromArray(d.o)); } });
+net.on('botdead', (d, from) => { if (from !== net.hostId || d.round !== match.state?.round || d.life !== match.actor(d.id)?.life || !match.actor(d.id)?.bot) return; const r = remote.get(d.id); if (r) { r.alive = false; r.ragdoll(null, false); } });
+net.on('botshots', (d, from) => {
+  if (from !== net.hostId || d.round !== match.state?.round || !match.actor(d.id)?.bot || !Array.isArray(d.o) || !Array.isArray(d.e)) return;
+  const r = remote.get(d.id), origin = new THREE.Vector3().fromArray(d.o), end = new THREE.Vector3().fromArray(d.e);
+  if (d.k === 'katana') audio.katanaSwing();
+  else { if (d.bal) bullets.fire(null, origin, end.sub(origin).normalize(), { cosmetic: true, mv: d.mv || 330, maxRange: 65, ink: r?.ink ?? INK.BLUE }); else effects.tracer(origin, end, r?.ink ?? INK.BLUE, .02, .08); r?.flash(); audio.remoteShot(d.k, origin); }
+});
 net.on('brk', (d) => { const br = level.breakables[d.id]; if (br) breakProp(br, null, false); });
-net.on('parry', (d) => { audio.shieldHit(player.center); input.rumble(0.35, 0.3, 60); effects.strokeBurst(player.eye.clone().addScaledVector(player.forward, 0.5), INK.ORANGE, 8, 5, { life: 0.2, size: 0.03 }); hud.kill(d.ret ? 'RETURN TO SENDER' : 'DEFLECTED', d.ret ? 25 : 0); });
+net.on('parry', (d) => { if (teamMode() && d.life != null && (d.round !== match.state?.round || d.life !== match.applied.get(net.id))) return; audio.shieldHit(player.center); input.rumble(0.35, 0.3, 60); effects.strokeBurst(player.eye.clone().addScaledVector(player.forward, 0.5), INK.ORANGE, 8, 5, { life: 0.2, size: 0.03 }); hud.kill(d.ret ? 'RETURN TO SENDER' : 'DEFLECTED', d.ret ? 25 : 0); });
 net.on('shots', (d, from) => {
   const r = remote.get(from); if (!r || !r.root || !r.alive) return;
   const th = TRACER_THICK[d.k] || 0.02;
@@ -978,7 +988,7 @@ function netUpdate(dt) {
     if (net.isHost) { const c = net.conns.get(id); if (c) { try { c.close(); } catch (e) { /* ignore */ } net.conns.delete(id); } net.send('leave', { id }); broadcastLobby(); sendScores(); }
   }
   hostQuiet = hostQuiet && !!remote.get(net.hostId) && performance.now() - (remote.get(net.hostId).lastSeen || 0) > 9000;
-  if (syncTick % 3 === 0 && inMatch()) net.send('ps', encodeLocal(player, player.weaponIndex, { firing: player.firing, idle: input.idleSeconds > IDLE_FLAG }), true);
+  if (syncTick % 3 === 0 && inMatch()) net.send('ps', localSnapshot({ firing: player.firing, idle: input.idleSeconds > IDLE_FLAG }), true);
   if (shotQueue.length) net.broadcast('shots', { k: player.weapon.kind, e: shotQueue.splice(0) });
   if (bulletQueue.length) net.broadcast('shots', { k: player.weapon.kind, mv: player.weapon.mv || 330, b: bulletQueue.splice(0) });
   if (teamMode()) { match.update(dt); return; }
@@ -1483,7 +1493,8 @@ function step(now) {
     if (st === 'over') { game.overT += dt; if (net.isHost && game.overT > 8) { net.send('backtolobby', {}); toLobbyScreen(); } else if (!net.isHost && game.overT > 15) { toLobbyScreen(); } }
   }
   for (const a of level.animated) a.update(game.time);
-  audio.setListener(player.eye, player.right);
+  if (match.spectatedId) audio.setListener(R.camera.position, _listenerRight.setFromMatrixColumn(R.camera.matrixWorld, 0));
+  else audio.setListener(player.eye, player.right);
   const w = player.weapon; if (w.isGun) hud.setAmmo(w.mag, w.reserve, w.magSize, w.reloading); else hud.setKatana();
   if (touch && !w.isGun) touch.clearAim();   // the katana has nothing to scope, so drop the toggle
   // the ring by the crosshair, reading whichever wait the gun is currently in

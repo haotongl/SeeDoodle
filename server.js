@@ -402,7 +402,7 @@ function noteCombat(room, d) {
   if (room.combat && d.mode === room.mode && d.round < room.combat.round) return deny('stale combat state');
   const actors = new Map(), bots = new Map();
   for (const row of d.actors) {
-    if (!row || typeof row.id !== 'string' || row.id.length > 96 || !row.id.length || actors.has(row.id) || (row.team !== 0 && row.team !== 1)) return deny('malformed combat actor');
+    if (!row || typeof row.id !== 'string' || row.id.length > 96 || !row.id.length || actors.has(row.id) || (row.team !== 0 && row.team !== 1) || !Number.isSafeInteger(row.life) || row.life < 0) return deny('malformed combat actor');
     const bot = row.bot === true;
     if (bot && (room.members.has(row.id) || bots.size >= 16)) return deny('invalid bot actor');
     if (!bot && !room.members.has(row.id)) continue;
@@ -415,7 +415,17 @@ function noteCombat(room, d) {
   const fresh = !room.combat || d.mode !== room.mode || d.round !== room.combat.round;
   if (fresh) room.unshielded.clear();
   else for (const [id, life] of room.unshielded) if (!actors.has(id) || actors.get(id).life !== life) room.unshielded.delete(id);
-  if (fresh) for (const actor of [...room.members.values(), ...bots.values()]) { actor.hist.length = 0; actor.grenades.clear(); actor.buckets = {}; }
+  for (const actor of [...room.members.values(), ...bots.values()]) {
+    const next = actors.get(actor.id), changedLife = next && room.actors.get(actor.id)?.life !== next.life;
+    if (fresh || changedLife) {
+      // Rewind may interpolate within a life, never from the corpse to the next spawn. Keep
+      // registered grenades across respawns: their launch and held positions belong to that life.
+      actor.hist.length = 0; actor.buckets = {};
+      if (fresh) actor.grenades.clear();
+      const spawn = next && vec3(next.spawn);
+      if (spawn) actor.hist.push({ t: Date.now(), x: spawn[0], y: spawn[1], z: spawn[2], alive: next.alive });
+    }
+  }
   room.mode = d.mode; room.actors = actors; room.bots = bots;
   room.combat = { ...d, actors: [...actors.values()] };
   return room.combat;
@@ -423,16 +433,23 @@ function noteCombat(room, d) {
 function sendCombat(room, client) {
   if (room.combat) send(client, { t: 'm', tt: 'combatstate', d: room.combat, from: room.hostId });
 }
-function combatGate(room, attacker, victim, round, allowDead = false) {
+function combatGate(room, attacker, victim, d, registered = null) {
   if (!teamMode(room)) return true;
   const c = room.combat;
-  if (!c || c.phase !== 'live' || round !== c.round) return deny('combat round is not live');
+  if (!c || c.phase !== 'live' || d?.round !== c.round) return deny('combat round is not live');
   const a = room.actors.get(attacker.id), b = victim && room.actors.get(victim.id);
-  if (!a || (!a.alive && !allowDead)) return deny('combat attacker is down');
+  if (!a || (!a.alive && !registered)) return deny('combat attacker is down');
+  if (!Number.isSafeInteger(d.life) || d.life !== (registered ? registered.life : a.life) || (registered && registered.round !== c.round)) return deny('stale attacker life');
   if (victim && (!b || !b.alive)) return deny('combat target is down');
+  if (b && (!Number.isSafeInteger(d.targetLife) || d.targetLife !== b.life)) return deny('stale target life');
   if (b && a.team === b.team) return deny('friendly fire');
   if (b && b.protectedUntil > Date.now()) return deny('spawn protection');
   return true;
+}
+function combatMove(room, client, round, life) {
+  if (!teamMode(room)) return true;
+  const a = room.actors.get(client.id);
+  return (room.combat && round === room.combat.round && a && Number.isSafeInteger(life) && life === a.life) || deny('stale position life');
 }
 
 // Round trip, measured from this end. The client is never asked what its ping is: a bigger number
@@ -456,7 +473,8 @@ function noteMove(client, d, now) {
   const h = client.hist;
   h.push({ t: now, x, y, z, alive: !!(d[6] & 64) });
   while (h.length > 2 && now - h[0].t > HIST_MS) h.shift();
-  for (const g of client.grenades.values()) if (g.phase === 'armed' && now <= g.expiresAt + 200) g.held = [x, y + 0.9, z];
+  const room = client.room, life = room.actors.get(client.id)?.life;
+  for (const g of client.grenades.values()) if (g.phase === 'armed' && now <= g.expiresAt + 200 && (!teamMode(room) || (g.life === life && g.round === room.combat?.round))) g.held = [x, y + 0.9, z];
   return true;
 }
 // Where this player was on the server's clock at time t, interpolated between the two samples
@@ -528,7 +546,8 @@ function noteGrenade(client, d, now) {
     if (g.phase === 'thrown' || d.phase === 'armed') return false;
     // A held grenade can move with its owner. Keep that position separately so a late death/drop
     // packet is not compared with the owner's already respawned location.
-    const self = whereAt(client, now), at = self && [self.x, self.y + 0.9, self.z];
+    const sameLife = !teamMode(client.room) || g.life === client.room.actors.get(client.id)?.life;
+    const self = sameLife && whereAt(client, now), at = self && [self.x, self.y + 0.9, self.z];
     if (len3(sub(pos, g.held)) > ORIGIN_SLACK && (!at || len3(sub(pos, at)) > ORIGIN_SLACK)) return deny('grenade did not start at the holder');
   } else {
     const slack = Math.min(1500, rttOf(client) + 750);
@@ -537,7 +556,7 @@ function noteGrenade(client, d, now) {
     const self = whereAt(client, now);
     if (!self || len3(sub(pos, [self.x, self.y + 0.9, self.z])) > ORIGIN_SLACK) return deny('grenade did not start at the holder');
     if (client.grenades.size >= GRENADE_LIMIT || !withinFireRate(client, 'grenade', now)) return deny('too many grenades');
-    g = { phase: d.phase, wireExpires: d.expiresAt, expiresAt: Math.min(d.expiresAt, now + GRENADE_FUSE_MS), held: pos, victims: new Set() };
+    g = { phase: d.phase, wireExpires: d.expiresAt, expiresAt: Math.min(d.expiresAt, now + GRENADE_FUSE_MS), held: pos, victims: new Set(), ...(teamMode(client.room) ? { round: d.round, life: d.life } : {}) };
     client.grenades.set(d.id, g);
   }
   g.phase = d.phase;
@@ -546,7 +565,7 @@ function noteGrenade(client, d, now) {
     const launched = d.thrownAt ?? now - Math.min(MAX_REWIND_MS, rttOf(client) / 2);
     g.thrownAt = Math.min(now, g.expiresAt, launched);
   }
-  return { id: d.id, phase: d.phase, pos, vel, expiresAt: g.expiresAt, charged: true, ...(d.phase === 'thrown' ? { thrownAt: g.thrownAt } : {}) };
+  return { id: d.id, phase: d.phase, pos, vel, expiresAt: g.expiresAt, charged: true, ...(d.phase === 'thrown' ? { thrownAt: g.thrownAt } : {}), ...(teamMode(client.room) ? { round: g.round, life: g.life } : {}) };
 }
 function grenadeCanReach(g, at) {
   if (g.phase === 'armed') return len3(sub(at, g.held)) <= ORIGIN_SLACK;
@@ -572,8 +591,9 @@ function resolveHit(client, m) {
   if (!room) return deny('no room');
   const victim = room.members.get(m.to) || room.bots.get(m.to);
   if (!victim || victim === client) return deny('no such target');
-  const lingeringGrenade = m.k === 'grenade' && client.grenades.get(m.gid)?.phase === 'thrown';
-  if (!combatGate(room, client, victim, m.round, lingeringGrenade)) return false;
+  const launched = m.k === 'grenade' && client.grenades.get(m.gid);
+  const lingeringGrenade = launched?.phase === 'thrown' ? launched : null;
+  if (!combatGate(room, client, victim, m, lingeringGrenade)) return false;
   const arm = ARMS[m.k];
   if (!arm) return deny('unknown weapon');
   const dmg = Number(m.dmg);
@@ -655,7 +675,7 @@ function resolveHit(client, m) {
 
   shots.ok++;
   const from = grenade ? vec3(m.at) : selfNow ? [+selfNow.x.toFixed(1), +(selfNow.y + 0.9).toFixed(1), +selfNow.z.toFixed(1)] : null;
-  const d = { amount: Math.round(dmg), from, by: client.id, crit: !!m.crit, src: m.k, ...(teamMode(room) ? { round: room.combat.round } : {}) };
+  const d = { amount: Math.round(dmg), from, by: client.id, crit: !!m.crit, src: m.k, ...(teamMode(room) ? { round: room.combat.round, life: room.actors.get(victim.id).life } : {}) };
   if (victim.bot) send(room.members.get(room.hostId), { t: 'm', tt: 'bdmg', from: client.id, d: { ...d, id: victim.id } });
   else send(victim, { t: 'm', tt: 'pdmg', from: client.id, d });
   return true;
@@ -812,18 +832,20 @@ function onMessage(client, raw) {
       }
       if (m.tt === 'botps') {
         const bot = m.d && room.bots.get(m.d.id);
+        if (bot && !combatMove(room, bot, m.d.round, m.d.life)) break;
         if (!bot || !noteMove(bot, m.d.ps, Date.now())) { deny('invalid bot position'); break; }
       }
       if (m.tt === 'botnade') {
         const bot = m.d && room.bots.get(m.d.id), packet = m.d && m.d.nade;
-        if (!bot || !packet || !combatGate(room, bot, null, m.d.round, bot.grenades.has(packet.id))) break;
+        if (!bot || !packet || !combatGate(room, bot, null, { ...packet, round: m.d.round }, bot.grenades.get(packet.id))) break;
+        packet.round = m.d.round;
         const grenade = noteGrenade(bot, packet, Date.now()); if (!grenade) break;
         toRoom(room, { t: 'm', tt: 'nade', from: bot.id, d: { ...grenade, round: room.combat.round } }, client.id);
         break;
       }
       if (m.tt === 'nade' && teamMode(room) && !(m.d && m.d.charged === true)) { deny('unregistered team grenade'); break; }
       if (m.tt === 'nade' && m.d && m.d.charged === true) {
-        if (!combatGate(room, client, null, m.d.round, client.grenades.has(m.d.id))) break;
+        if (!combatGate(room, client, null, m.d, client.grenades.get(m.d.id))) break;
         const grenade = noteGrenade(client, m.d, Date.now());
         if (!grenade) break;
         m.d = { ...grenade, ...(teamMode(room) ? { round: room.combat.round } : {}) };
@@ -835,7 +857,10 @@ function onMessage(client, raw) {
       if (m.tt === 'pdmg' && (client.id !== room.hostId || teamMode(room))) { deny('pdmg sent direct'); break; }
       // The position feed is relayed as it always was, but read on the way past: this is what the
       // rewind is built from, stamped with the time it got here.
-      if (m.tt === 'ps') noteMove(client, m.d, Date.now());
+      if (m.tt === 'ps') {
+        if (!combatMove(room, client, m.d?.[14], m.d?.[15])) break;
+        noteMove(client, m.d, Date.now());
+      }
       // Position and enemy snapshots describe the present and are worthless late; everything else
       // is an event that has to arrive. See WSConn.send for what that buys on a stalled link.
       const drop = m.tt === 'ps' || m.tt === 'esnap' || m.tt === 'botps';
