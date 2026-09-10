@@ -480,7 +480,7 @@ function announceGrenade(d, position = encodeLocal(player, player.weaponIndex)) 
 player.onThrow = (d) => {
   if (d.charged && net.connected) {
     pruneNadeAnnouncements();
-    d = { ...d, ...(d.phase === 'thrown' ? { thrownAt: ctx.grenadeNow() } : {}) };
+    d = { ...d, ...(d.phase === 'thrown' ? { thrownAt: d.thrownAt ?? ctx.grenadeNow() } : {}) };
     if (d.expiresAt > ctx.grenadeNow()) localNadeAnnouncements.set(d.id, { d, position: encodeLocal(player, player.weaponIndex), owner: net.id });
     while (localNadeAnnouncements.size > 32) localNadeAnnouncements.delete(localNadeAnnouncements.keys().next().value);
   }
@@ -1053,6 +1053,7 @@ function configHTML() {
       ${touchMode ? cfgRow('aimAssist', 'aim assist', 'how hard the view leans toward what it thinks you meant') : ''}
       ${cfgRow('shake', 'screen shake', 'how hard an explosion kicks the camera')}
       ${cfgRow('bob', 'view bob', 'how much the view rocks as you run')}
+      ${cfgCheck('setGrenadeAutoPin', settings.grenadeAutoPin, 'automatic grenade pin pull', 'grenades only - full charge starts the 7-second fuse; off keeps aiming safe')}
     </div>
     <div class="cfgcol"><div class="cfghead">GAME</div>
       ${cfgCheck('setMus', musicWanted, 'music', '(M)')}
@@ -1075,6 +1076,7 @@ function wireConfig() {
     applySettings();
   });
   p.querySelector('#setInv').addEventListener('change', (e) => { settings.invert = e.target.checked; applySettings(); });
+  p.querySelector('#setGrenadeAutoPin').addEventListener('change', (e) => { player.cancelGrenade(); settings.grenadeAutoPin = e.target.checked; applySettings(); });
   p.querySelector('#setMus').addEventListener('change', (e) => { musicWanted = e.target.checked; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); });
   p.querySelector('#setBal').addEventListener('change', (e) => { settings.ballistics = e.target.checked; applySettings(); });
   p.querySelector('#setDiff').addEventListener('click', (e) => {
@@ -1084,7 +1086,7 @@ function wireConfig() {
     p.querySelector('#diffNote').textContent = ts(diffOf(settings.difficulty).blurb);
   });
   p.querySelector('#setLang').addEventListener('click', (e) => { const b = e.target.closest('.langbtn'); if (b) { setLang(b.dataset.lang); redrawScreen(); } });
-  p.querySelector('#cfgReset').addEventListener('click', () => { for (const k in SETTINGS) settings[k] = SETTINGS[k].def; applySettings(); showConfig(); });
+  p.querySelector('#cfgReset').addEventListener('click', () => { player.cancelGrenade(); for (const k in SETTINGS) settings[k] = SETTINGS[k].def; applySettings(); showConfig(); });
   p.querySelector('#cfgBack').addEventListener('click', () => closeConfig());
 }
 function wireName(box) {
@@ -1312,7 +1314,7 @@ function resetGame() {
   localNadeAnnouncements.clear();
   game.score = 0; game.kills = 0; game.combo = 0; game.wave = 0; game.intermission = 0; game.queue = []; game.time = 0; game.over = null; game.matchT = 0; hud.setScore(0, 0); hud.setTimer(''); hud.setPvpScore(null); hud.setWave(1, 0); hud.setBoard(null);
 }
-function beginCommon() { audio.init(); audio.resume(); if (!input.usingGamepad && !touchMode) input.requestLock(); if (musicWanted && !audio.musicPlaying) audio.musicOn(true); hud.hideScreen(); hud.setGameplayVisible(true); game.menu = false; }
+function beginCommon() { player._resetGrenadeInput(); audio.init(); audio.resume(); if (!input.usingGamepad && !touchMode) input.requestLock(); if (musicWanted && !audio.musicPlaying) audio.musicOn(true); hud.hideScreen(); hud.setGameplayVisible(true); game.menu = false; }
 function begin() { game.mode = 'solo'; setArena(false); beginCommon(); if (game.state === 'start' || game.state === 'dead') { resetGame(); startWave(1); } game.state = 'play'; }
 function beginAtWave(n) { game.mode = 'solo'; setArena(false); beginCommon(); resetGame(); startWave(n); game.state = 'play'; }
 function jumpToWave(n) { enemies.clear(); effects.clear(); bullets.clear(); enemies.mods.speed = 1; enemies.mods.damage = 1; endFocus(); game.intermission = 0; game.queue = []; startWave(n); hud.hideScreen(); hud.setGameplayVisible(true); game.state = 'play'; game.menu = false; audio.reelLoop(false); }
@@ -1345,7 +1347,7 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
   setTimeout(() => { if (game.state === 'play' && !input.pointerLocked && !input.usingGamepad) { player.cancelGrenade(); player.cancelKnife(); game.menu = true; showClickToPlay(); } }, 250);
 }
 function pause(at = performance.now()) { if ((game.state !== 'play' && !(game.state === 'dying' && online())) || game.menu) return; player.cancelGrenade(at); player.cancelKnife(); if (!online()) game.state = 'pause'; game.menu = true; showPause(); audio.reelLoop(false); }
-function resume() { if (online()) { game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad && !touchMode) input.requestLock(); return; } begin(); }
+function resume() { if (online()) { player._resetGrenadeInput(); game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad && !touchMode) input.requestLock(); return; } begin(); }
 Object.assign(window.__game, { startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, applySkin, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
 hud.onScreenClick = () => {
   // the config sits on top of whatever screen opened it, so anything that would have dismissed that
@@ -1380,8 +1382,6 @@ function step(now) {
   // the thumbs are folded in first so Input.update sees them alongside the keyboard and the pad
   if (touch) { touch.setActive((game.state === 'play' || game.state === 'dying') && !game.menu); touch.update(); }
   input.update(dt);
-  // Fuses use their absolute deadline even while movement is paused or slowed.
-  player.tickGrenades?.(dt);
   const st = game.state; const playing = st === 'play' || st === 'dying';
   // the config screen eats every key that would otherwise dismiss the screen underneath it
   if (cfgBack) { if (input.pressed('jump') || input.pressed('confirm') || input.pressed('pause')) closeConfig(); }
@@ -1403,11 +1403,14 @@ function step(now) {
   else if (game.focus.active) scale = FOCUS_SCALE;
   const sdt = dt * scale;
   if (st === 'play' && !online()) updateFocus(dt); else endFocus();
+  // Resolve queued releases before their fuse deadline, including a frame that arrives late.
+  // Menus and non-playing states still advance live grenades on the same real-time clock.
+  if (!playing) player.tickGrenades?.(dt);
   if (playing) {
     game.time += sdt; if (player.shieldT > 0) player.shieldT -= dt;
     musicHealT -= dt; if (musicHealT <= 0) { musicHealT = 2; if (musicWanted && st === 'play' && !audio.musicPlaying && audio.ctx) audio.musicOn(true); if (input.anyInput) audio.resume(); }
     { const B = level.bounds, bp = player.body.pos; if (bp.x < B.minX - 8 || bp.x > B.maxX + 8 || bp.z < B.minZ - 8 || bp.z > B.maxZ + 8 || bp.y > 150) bp.y = -100; }
-    player.update(sdt); bullets.update(sdt); enemies.update(sdt); effects.update(sdt); updatePickups(sdt); netUpdate(dt);
+    player.update(sdt); player.tickGrenades?.(dt); bullets.update(sdt); enemies.update(sdt); effects.update(sdt); updatePickups(sdt); netUpdate(dt);
     // the co-op host runs the waves for the whole lobby; clients get told what came out of them
     if (st === 'play' && (!online() || coopHost())) updateWaves(sdt);
     if (online()) updateArenaPickups(dt);

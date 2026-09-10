@@ -45,6 +45,7 @@ export class Player {
     this.isLocal = true; this.team = 0; this.name = 'you'; this.grenades = 3; this.maxGrenades = 5; this.nades = []; this.nadeCd = 0; this.firing = false; this.onThrow = null;
     this._heldNade = null; this._nadeBlocked = false; this._nadeSeq = 0; this._nadeSeen = new Map();
     this._nadeChargeStart = null; this._nadeChargeAfter = performance.now(); this._nadeChargeSources = new Set();
+    this._nadeInputSeq = ctx.input.holdEventSeq; this._nadeReadyAt = 0; this._nadeAutoPin = false; this._nadeBuffered = false;
     const rm = makeInkMaterial({ ink: INK.BLUE, fill: false, shadeBias: -0.3 });
     this.rope = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 6), rm); this.rope.visible = false; ctx.scene.add(this.rope);
     const hm = makeInkMaterial({ ink: INK.BLUE }); this.hookMesh = new THREE.Group();
@@ -59,11 +60,11 @@ export class Player {
     this.hp = this.maxHp; this.alive = true; this.yaw = 0; this.pitch = 0; this.roll = 0; this.hurtFx = 0; this.flashFx = 0; this.crouching = false; this.sliding = false; this.deathT = 0; this.lastDamageT = 10; this.dashCd = 0; this.airJumps = 1; this.gravityScale = 1; this.dashLock = false;
     this.detachGrapple(false);
     for (const w of this.weapons) if (w.isGun) { w.mag = w.magSize; w.reserve = w.startReserve; w.reloading = false; w.pumpT = 0; w.relock(); }
-    this.returnT = 0; this.nadeCd = 0; this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1); this._aiming = false; this.firing = false;
+    this.returnT = 0; this.nadeCd = 0; this._nadeReadyAt = 0; this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1); this._aiming = false; this.firing = false;
     const blade = this.weapons[this.katanaIndex]; blade.slashT = 0; blade.blocking = false; blade.blockAmt = 0; blade.cooldown = 0;
     this.switchTo(this.weapons.findIndex((w, i) => !w.locked && this.weaponAllowed(i)), true); this.rig.visible = true; this.eyeH = EYE_STAND; this.grenades = this.grenadesAllowed ? 3 : 0; if (!keepGrenades) this.clearNades();
   }
-  clearNades() { for (const n of this.nades) this.ctx.scene.remove(n.mesh); this.nades.length = 0; this._nadeSeen.clear(); this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeChargeStart = null; this._nadeChargeSources.clear(); if (this._arc) this.updateNadeArc(-1); }
+  clearNades() { for (const n of this.nades) this.ctx.scene.remove(n.mesh); this.nades.length = 0; this._nadeSeen.clear(); this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeChargeStart = null; this._nadeReadyAt = 0; this.nadeCd = 0; this._resetGrenadeInput(); if (this._arc) this.updateNadeArc(-1); }
   get isBlocking() { return this.weapon.kind === 'katana' && this.weapon.blocking; }
   aimDir(spread = 0) { const d = this.aimFwd.clone(); if (spread > 0) { d.addScaledVector(this.aimRight, rand(-spread, spread)); d.y += rand(-spread, spread); d.normalize(); } return d; }
   // Recoil moves the aim for real - the spring is only the flourish on top - and until now that
@@ -123,6 +124,7 @@ export class Player {
     const next = weaponModeOf(key); if (next === this.weaponRules) return;
     this.cancelGrenade(); this.cancelKnife();
     const previous = this.weaponRules; this.weaponRules = next;
+    this._nadeReadyAt = 0; this.nadeCd = 0; this._resetGrenadeInput();
     this.weapons[this.grenadeIndex].locked = !this.weaponAllowed('grenade');
     // A room rule change must cancel a charged throw, queued quick slash and scoped pose too.
     this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1);
@@ -338,7 +340,7 @@ export class Player {
     if (moving) { this.bobPhase += dt * (7 + hs2 * 0.5); this.stepDist += hs2 * dt; if (this.stepDist > (sprinting ? 2.5 : 2.0)) { this.stepDist = 0; audio.footstep(clamp(hs2 / 8, 0.3, 1)); } }
     this._updateCamera(dt);
     // ---- grenades ----
-    this.nadeCd -= dt;
+    this.nadeCd = this.weaponRules.key === 'grenades' ? Math.max(0, (this._nadeReadyAt - performance.now()) / 1000) : this.nadeCd - dt;
     this._updateGrenadeInput(dt);
     // ---- weapons ----
     for (let i = 0; i < 5; i++) if (inp.pressed('slot' + (i + 1))) this.switchTo(Math.min(i, this.weapons.length - 1));
@@ -357,6 +359,8 @@ export class Player {
   cancelKnife() { this.weapons[this.katanaIndex].cancelCharge(); }
   get grenadeStatus() {
     return { state: this._heldNade ? 'armed' : this._nadeHeld ? 'safe' : 'idle', charge: this.nadeCharge,
+      autoPin: this._nadeHeld ? this._nadeAutoPin : !!this.opt.grenadeAutoPin,
+      cooldown: Math.max(0, (this._nadeReadyAt - performance.now()) / 1000),
       remaining: this._heldNade ? Math.max(0, (this._heldNade.expiresAt - this._grenadeNow()) / 1000) : null };
   }
   _grenadeNow() { return this.ctx.grenadeNow ? this.ctx.grenadeNow() : Date.now(); }
@@ -368,6 +372,12 @@ export class Player {
   }
   _updateGrenadeInput(dt) {
     const inp = this.ctx.input, charged = this.weaponRules.key === 'grenades';
+    if (charged) {
+      if (!this._grenadeControlsAllowed()) { this.cancelGrenade(); return; }
+      this._processGrenadeEvents(performance.now());
+      this.updateNadeArc(this._nadeHeld ? this.nadeCharge : -1);
+      return;
+    }
     const held = inp.down('grenade') || (this.weapon.kind === 'grenade' && inp.down('fire'));
     // A cancelled hold cannot become a fresh throw until every initiating control is released.
     if (this._nadeBlocked) {
@@ -376,45 +386,78 @@ export class Player {
     }
     if (!this._grenadeControlsAllowed()) { if (this._nadeHeld) this.cancelGrenade(); return; }
     const canThrow = this.grenadesAllowed && (this.infiniteGrenades || this.grenades > 0) && this.nadeCd <= 0;
-    const now = performance.now();
     if (held && canThrow) {
-      if (charged) {
-        const actions = ['grenade', 'fire'].filter((a) => inp.down(a));
-        if (!this._nadeHeld) {
-          const fresh = actions.filter((a) => (inp.holdTiming(a)?.start ?? now) >= this._nadeChargeAfter);
-          if (!fresh.length) return;
-          this._nadeChargeStart = Math.max(this._nadeChargeAfter, Math.min(...fresh.map((a) => inp.holdTiming(a)?.start ?? now)));
-        }
-        for (const a of actions) this._nadeChargeSources.add(a);
-      } else this.nadeCharge = Math.min(1, this.nadeCharge + dt / 1.1);
+      this.nadeCharge = Math.min(1, this.nadeCharge + dt / 1.1);
       this._nadeHeld = true;
     }
-    let released = !held;
-    if (charged && this._nadeHeld) {
-      const timings = [...this._nadeChargeSources].map((a) => inp.holdTiming(a));
-      released = timings.every((timing) => timing ? !timing.held : !held);
-      const end = released ? Math.min(now, Math.max(...timings.map((timing) => timing?.end ?? now))) : now;
-      const cancel = ['nadeCancel', 'aim', 'melee'].filter((a) => inp.pressed(a));
-      if (cancel.length) { this.cancelGrenade(Math.min(...cancel.map((a) => inp.holdTiming(a)?.start ?? now))); return; }
-      this._advanceGrenadeCharge(end, !released);
-    }
-    if (this._nadeHeld && released) {
+    if (this._nadeHeld && !held) {
       if (canThrow) this.throwGrenade(null, this.nadeCharge); else this.cancelGrenade();
       this._nadeHeld = false; this.nadeCharge = 0;
     }
     this.updateNadeArc(this._nadeHeld ? this.nadeCharge : -1);
   }
-  _advanceGrenadeCharge(until, announce = true) {
+  _resetGrenadeInput() {
+    const inp = this.ctx.input;
+    this._nadeInputSeq = inp.holdEventSeq; this._nadeChargeAfter = performance.now(); this._nadeChargeSources.clear();
+    for (const action of ['fire', 'grenade']) if (inp.holdTiming(action)?.held) this._nadeChargeSources.add(action);
+    this._nadeBlocked = this._nadeChargeSources.size > 0;
+  }
+  _grenadeEventEpoch(at) { return this._grenadeNow() - (performance.now() - at); }
+  _processGrenadeEvents(until, cancel = false) {
+    const events = this.ctx.input.holdEventsAfter(this._nadeInputSeq, until);
+    if (cancel) events.push({ action: 'nadeCancel', down: true, time: until });
+    const isCancel = (event) => event.down && ['nadeCancel', 'aim', 'melee'].includes(event.action);
+    // Cancellation wins ties; all other events keep their physical order, even between frames.
+    events.sort((a, b) => a.time - b.time || Number(isCancel(b)) - Number(isCancel(a)) || (a.seq ?? Infinity) - (b.seq ?? Infinity));
+    let cancelledAt = null;
+    for (const event of events) {
+      if (event.seq) this._nadeInputSeq = Math.max(this._nadeInputSeq, event.seq);
+      const { action, down, time } = event;
+      if (isCancel(event)) cancelledAt = time;
+      if (action === 'fire' || action === 'grenade') {
+        if (down) {
+          this._nadeChargeSources.add(action);
+          if (!this._nadeHeld && !this._nadeBlocked && time !== cancelledAt && time >= this._nadeChargeAfter && this.grenadesAllowed && (this.infiniteGrenades || this.grenades > 0)) {
+            this._nadeHeld = true; this._nadeAutoPin = !!this.opt.grenadeAutoPin;
+            this._nadeBuffered = time < this._nadeReadyAt;
+            this._nadeChargeStart = Math.max(time, this._nadeReadyAt); this.nadeCharge = 0;
+          }
+        } else {
+          this._nadeChargeSources.delete(action);
+          if (!this._nadeChargeSources.size) {
+            if (this._nadeHeld) {
+              this._advanceGrenadeCharge(time, false);
+              if (!this._nadeBuffered || time > this._nadeChargeStart) this._releaseGrenade(false, this.nadeCharge, time);
+              else this._cancelGrenadeState(time);
+            }
+            this._nadeBlocked = false;
+          }
+        }
+      } else if (down && this._nadeHeld && time >= this._nadeChargeStart) {
+        this._advanceGrenadeCharge(time, !isCancel(event), !isCancel(event));
+        if (isCancel(event)) this._cancelGrenadeState(time);
+        else if (action === 'reload') this._primeGrenade(true, this._grenadeEventEpoch(time));
+      } else if (isCancel(event)) this._cancelGrenadeState(time);
+    }
+    this._advanceGrenadeCharge(until);
+  }
+  _advanceGrenadeCharge(until, announce = true, inclusive = true) {
     if (!this._nadeHeld || this.weaponRules.key !== 'grenades' || this._nadeChargeStart === null) return;
+    if (this._heldNade) return;
     this.nadeCharge = clamp((until - this._nadeChargeStart) / 1100, 0, 1);
-    if (this.nadeCharge >= 1) this._primeGrenade(announce, this._grenadeNow() - (performance.now() - this._nadeChargeStart - 1100));
+    const pinAt = this._nadeChargeStart + 1100;
+    if (this._nadeAutoPin && (inclusive ? until >= pinAt : until > pinAt)) this._primeGrenade(announce, this._grenadeEventEpoch(pinAt));
   }
   cancelGrenade(at = performance.now()) {
-    const held = this._nadeHeld || this.ctx.input.down('fire') || this.ctx.input.down('grenade');
-    this._advanceGrenadeCharge(at, false);
-    if (this._heldNade) this._releaseGrenade(true);
+    const game = this.ctx.game;
+    if (this.weaponRules.key === 'grenades' && (this._nadeHeld || (this.alive && !game.menu && game.state === 'play'))) this._processGrenadeEvents(at, true);
+    else this._cancelGrenadeState(at);
+  }
+  _cancelGrenadeState(at) {
+    const held = this.weaponRules.key === 'grenades' ? this._nadeChargeSources.size > 0 : this.ctx.input.down('fire') || this.ctx.input.down('grenade');
+    if (this._heldNade) this._releaseGrenade(true, this.nadeCharge, at);
     this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeBlocked = held;
-    this._nadeChargeStart = null; this._nadeChargeSources.clear(); this._nadeChargeAfter = performance.now();
+    this._nadeChargeStart = null; this._nadeChargeAfter = at;
     this.weapons[this.grenadeIndex].resetThrowPose?.();
     if (this._arc) this.updateNadeArc(-1);
   }
@@ -431,16 +474,19 @@ export class Player {
     audio.shell(); this.ctx.input.rumble(0.15, 0.25, 45);
     return n;
   }
-  _grenadePacket(n) { return { id: n.id, phase: n.phase, pos: n.pos.toArray(), vel: n.vel.toArray(), expiresAt: n.expiresAt, charged: true }; }
-  _releaseGrenade(drop = false, charge = this.nadeCharge) {
-    const n = this._heldNade || this._primeGrenade(false); if (!n) return false;
+  _grenadePacket(n) { return { id: n.id, phase: n.phase, pos: n.pos.toArray(), vel: n.vel.toArray(), expiresAt: n.expiresAt, charged: true, ...(n.phase === 'thrown' && Number.isFinite(n.thrownAt) ? { thrownAt: n.thrownAt } : {}) }; }
+  _releaseGrenade(drop = false, charge = this.nadeCharge, at = performance.now()) {
+    const releasedAt = this._grenadeEventEpoch(at);
+    const n = this._heldNade || this._primeGrenade(false, releasedAt); if (!n) return false;
+    if (n.expiresAt <= releasedAt) drop = true;
     this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0;
-    this._nadeChargeStart = null; this._nadeChargeSources.clear(); this._nadeChargeAfter = performance.now();
-    n.phase = 'thrown'; n.rest = false; n.mesh.visible = true; n.lastSimAt = this._grenadeNow();
-    if (drop && n.expiresAt <= this._grenadeNow()) { this._grenadeHand(n.pos); n.vel.set(0, 0, 0); }
+    this._nadeChargeStart = null; this._nadeChargeAfter = at;
+    // Send the actual launch before tickGrenades catches up, so delayed frames retain flight time.
+    n.phase = 'thrown'; n.rest = false; n.mesh.visible = true; n.lastSimAt = releasedAt; n.thrownAt = releasedAt;
+    if (drop && n.expiresAt <= releasedAt) { this._grenadeHand(n.pos); n.vel.set(0, 0, 0); }
     else if (drop) { n.pos.copy(this.body.pos).addScaledVector(this.forward, 0.35); n.pos.y = this.body.pos.y + 0.35; n.vel.copy(this.body.vel).multiplyScalar(0.35); }
     else this._nadeLaunch(charge, n.pos, n.vel);
-    n.mesh.position.copy(n.pos); this.nadeCd = 0.55;
+    n.mesh.position.copy(n.pos); this._nadeReadyAt = performance.now() + 800; this.nadeCd = 0.8;
     if (this.onThrow) this.onThrow(this._grenadePacket(n));
     if (!drop) this._grenadeThrowFeedback(charge);
     if (this._arc) this.updateNadeArc(-1);
@@ -458,7 +504,8 @@ export class Player {
     audio.grappleFire(); this.ctx.input.rumble(0.2, 0.4, 50);
   }
   throwGrenade(remote = null, charge = 0) {
-    if (!this.grenadesAllowed || (!remote && (!this.alive || this.dashLock || this.nadeCd > 0 || (!this.infiniteGrenades && this.grenades <= 0)))) return false;
+    const cooling = this.weaponRules.key === 'grenades' ? performance.now() < this._nadeReadyAt : this.nadeCd > 0;
+    if (!this.grenadesAllowed || (!remote && (!this.alive || this.dashLock || cooling || (!this._heldNade && !this.infiniteGrenades && this.grenades <= 0)))) return false;
     if (!remote && this.weaponRules.key === 'grenades') { this._nadeHeld = true; return this._releaseGrenade(false, clamp(charge, 0, 1)); }
     let pos, vel;
     if (remote) { if (!validNadeVector(remote.pos, 10000) || !validNadeVector(remote.vel, 150)) return false; pos = new THREE.Vector3().fromArray(remote.pos); vel = new THREE.Vector3().fromArray(remote.vel); }
@@ -554,8 +601,8 @@ export class Player {
       }
       if (n.fuse <= 0) {
         if (n === this._heldNade) {
-          this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeBlocked = true; this.nadeCd = 0.55;
-          this._nadeChargeStart = null; this._nadeChargeSources.clear(); this._nadeChargeAfter = performance.now();
+          this._heldNade = null; this._nadeHeld = false; this.nadeCharge = 0; this._nadeBlocked = true; this.nadeCd = 0.8; this._nadeReadyAt = performance.now() + 800;
+          this._nadeChargeStart = null; this._nadeChargeAfter = performance.now();
           this.weapons[this.grenadeIndex].resetThrowPose?.();
           n.phase = 'thrown'; if (this.onThrow) this.onThrow(this._grenadePacket(n));
           if (this._arc) this.updateNadeArc(-1);

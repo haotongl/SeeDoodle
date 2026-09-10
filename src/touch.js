@@ -113,9 +113,9 @@ export class TouchControls {
       return;
     }
     if (p.kind === 'look' || (p.kind === 'btn' && p.look)) {
+      p.overCancel = this._overGrenadeCancel(e, p); this._syncCancelHover();
       // straight into the same accumulator the mouse feeds, so one sensitivity setting covers both
-      this.input.mx += (e.clientX - p.x) * this.sens;
-      this.input.my += (e.clientY - p.y) * this.sens;
+      if (!p.overCancel) { this.input.mx += (e.clientX - p.x) * this.sens; this.input.my += (e.clientY - p.y) * this.sens; }
       p.x = e.clientX; p.y = e.clientY;
       this.input.usingTouch = true; this.input.lastActive = performance.now(); this.input.anyInput = true;
     }
@@ -125,17 +125,29 @@ export class TouchControls {
     const p = this.ptrs.get(e.pointerId); if (!p) return;
     // Losing a touch is an interruption, not an intentional throw. The same cancel action safely
     // stows a safe grenade or drops a live one, without leaving a held input behind.
-    if (e.type === 'pointercancel' && this._weaponMode === 'grenades' && (p.a === 'fire' || p.a === 'grenade')) {
+    if ((e.type === 'pointercancel' && this._weaponMode === 'grenades' && (p.a === 'fire' || p.a === 'grenade')) ||
+        (e.type === 'pointerup' && this._overGrenadeCancel(e, p))) {
       this._press('nadeCancel'); this._release('nadeCancel');
     }
     if (e.type === 'pointercancel' && p.a === 'fire') this.input.onControlCancel?.();
     this.ptrs.delete(e.pointerId);
+    this._syncCancelHover();
     if (p.kind === 'stick') { this.stick = null; this._syncStick(); }
     else if (p.kind === 'btn') { this._release(p.a); p.btn.classList.remove('on'); }
   }
 
   _press(a) { const f = (this.frames[a] ||= { down: 0, n: 0 }); f.down++; f.n = 0; this.input.markTouchHold(a, true); }
   _release(a) { const f = this.frames[a]; if (f) { f.down = Math.max(0, f.down - 1); this.input.markTouchHold(a, f.down > 0); } }
+  _overGrenadeCancel(e, pointer) {
+    if (pointer.a !== 'fire' || this._weaponMode !== 'grenades' || !['safe', 'armed'].includes(this._grenadeState?.state)) return false;
+    const el = this.btnEls.nadeCancel?.[0]; if (!el || !el.getClientRects().length) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && Math.hypot((e.clientX - r.x - r.width / 2) / (r.width / 2), (e.clientY - r.y - r.height / 2) / (r.height / 2)) <= 1;
+  }
+  _syncCancelHover() {
+    const over = [...this.ptrs.values()].some((p) => p.overCancel);
+    for (const el of this.btnEls.nadeCancel || []) el.classList.toggle('drop-target', over);
+  }
 
   _syncStick() {
     const s = this.stick, el = this.stickEl;
@@ -144,7 +156,7 @@ export class TouchControls {
     el.style.transform = `translate(${s.ox.toFixed(0)}px, ${s.oy.toFixed(0)}px)`;
     el.querySelector('b').style.transform = `translate(${(s.x * 52).toFixed(0)}px, ${(-s.y * 52).toFixed(0)}px)`;
   }
-  _syncBtns() { for (const a in this.btnEls) for (const el of this.btnEls[a]) el.classList.remove('on'); }
+  _syncBtns() { for (const a in this.btnEls) for (const el of this.btnEls[a]) el.classList.remove('on', 'drop-target'); }
   _syncFireFace() {
     const face = ts(this._weaponMode === 'grenades' ? 'THROW' : this._weaponMode === 'knives' || this._katanaActive ? 'CHARGE' : 'FIRE');
     for (const el of this.btnEls.fire || []) if (el.textContent !== face) el.textContent = face;
@@ -172,7 +184,7 @@ export class TouchControls {
     for (const action of ['grenade', 'melee', 'reload', 'aim']) {
       const hidden = action === 'grenade' ? false : action === 'melee' || action === 'aim' ? grenades : grenades || knives;
       for (const el of this.btnEls[action] || []) el.classList.toggle('gone', hidden);
-      if (hidden) delete this.frames[action];
+      if (hidden) { delete this.frames[action]; this.input.markTouchHold(action, false); }
     }
     this._syncFireFace();
     this._grenadeKey = null; this.setGrenadeState(this._grenadeState);
@@ -186,6 +198,11 @@ export class TouchControls {
       el.classList.toggle('gone', state === 'idle'); el.classList.toggle('live', state === 'armed');
       el.textContent = ts(state === 'armed' ? 'DROP' : 'CANCEL');
     }
+    for (const el of this.btnEls.reload || []) {
+      el.textContent = ts(this._weaponMode === 'grenades' ? 'PULL PIN' : 'RELOAD');
+      el.classList.toggle('gone', this._weaponMode === 'grenades' ? state !== 'safe' : this._weaponMode === 'knives');
+    }
+    if (state === 'idle') { for (const p of this.ptrs.values()) p.overCancel = false; this._syncCancelHover(); }
   }
 
   // called once per frame, before Input.update folds everything together
@@ -219,8 +236,10 @@ export const TOUCH_CONTROLS_HTML = `
     <div><b>KATANA</b> full charge in 0.8 seconds = 3x damage</div>
     <div><b>AIM</b> is a toggle: tap once to sight in, again to come out</div>
     <div><b>THROW</b> in grenades only: hold and drag to aim, release to throw</div>
-    <div><b>Full charge</b> automatically pulls the pin after 1.1 seconds; the fuse lasts 7 seconds</div>
+    <div><b>PULL PIN</b> starts the 7-second fuse and locks the current throw power</div>
+    <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
     <div><b>CANCEL</b> stows a safe grenade; after pulling the pin, DROP leaves it at your feet</div>
+    <div><b>THROW</b> drag to CANCEL or DROP and release there; passing over does not cancel</div>
   </div>
   <div><div class="colhead">BUTTONS</div>
     <div><b>JUMP</b> again in the air = double jump · at a wall = wall jump</div>
@@ -236,5 +255,5 @@ export const TOUCH_KEYS = {
   fire: 'FIRE', aim: 'AIM', block: 'AIM', jump: 'JUMP', sprint: 'push the stick forward', slide: 'SLIDE', dash: 'SLIDE',
   grapple: 'HOOK', melee: 'SLASH', reload: 'RELOAD', grenade: 'NADE', focus: 'AIM + FIRE', next: 'the weapon numbers',
   pause: '❚❚', confirm: 'tap the screen', score: 'TAB',
-  nadeCancel: 'CANCEL',
+  nadePin: 'PULL PIN', nadeCancel: 'CANCEL',
 };

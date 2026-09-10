@@ -10,6 +10,7 @@ const KEYMAP = {
 const MOUSEMAP = { 0: 'fire', 2: 'aim', 1: 'grapple', 3: 'grapple', 4: 'melee' };
 // Standard gamepad mapping (DualSense): 0 cross,1 circle,2 square,3 triangle,4 L1,5 R1,6 L2,7 R2,8 create,9 options,10 L3,11 R3,12-15 dpad
 const PADMAP = { 0: 'jump', 1: 'crouch', 2: 'reload', 3: 'nextWeapon', 4: 'grapple', 5: 'melee', 6: 'aim', 7: 'fire', 9: 'pause', 10: 'sprint', 11: 'grenade', 12: 'grenade', 13: 'slot5', 14: 'prevWeapon', 15: 'nextWeapon', 8: 'score', 17: 'confirm' };
+const GRENADE_ACTIONS = new Set(['fire', 'grenade', 'reload', 'aim', 'melee', 'nadeCancel']);
 
 export class Input {
   constructor(canvas) {
@@ -27,6 +28,7 @@ export class Input {
     this.onLockChange = null; this.onAnyInput = null; this.lastActive = performance.now();
     this.invertY = false; this.onDeviceChange = null; this.onControlCancel = null;
     this.holdTimes = {}; this.holdSources = {}; this.timedTouch = new Set();
+    this.holdEvents = []; this.holdEventSeq = 0;
     const cancelControls = () => {
       this.keys = {}; this.mouseBtns = {}; this.pressQueue = {}; this.framePresses = {};
       if (this.onControlCancel) this.onControlCancel();
@@ -132,7 +134,7 @@ export class Input {
       this._pad = pad;
     } else this._pad = null;
     this.padPrev = this.padState; this.padState = padS;
-    for (const a of ['fire', 'grenade', 'aim', 'melee', 'nadeCancel', 'pause']) {
+    for (const a of ['fire', 'grenade', 'reload', 'aim', 'melee', 'nadeCancel', 'pause']) {
       this.markHold(a, !!padS[a], 'pad');
       if (!this.timedTouch.has(a)) this.markHold(a, !!this.touchKeys[a], 'touch');
     }
@@ -153,9 +155,15 @@ export class Input {
     const now = performance.now();
     if (held) this.holdTimes[a] = { start: now, end: null, held: true };
     else if (this.holdTimes[a]) { this.holdTimes[a].end = now; this.holdTimes[a].held = false; }
+    // Retain event order across sparse frames, including two pin taps or pin then blur.
+    if (GRENADE_ACTIONS.has(a)) {
+      this.holdEvents.push({ action: a, down: held, time: now, seq: ++this.holdEventSeq });
+      if (this.holdEvents.length > 256) this.holdEvents.splice(0, this.holdEvents.length - 256);
+    }
   }
   markTouchHold(a, down) { this.timedTouch.add(a); this.markHold(a, down, 'touch'); }
   holdTiming(a) { return this.holdTimes[a] || null; }
+  holdEventsAfter(seq, until = performance.now()) { return this.holdEvents.filter((event) => event.seq > seq && event.time <= until); }
   down(a) { return !!this.state[a]; }
   get idleSeconds() { return (performance.now() - this.lastActive) / 1000; }
   pressed(a) { return !!this.framePresses[a] || (!!this.state[a] && !this.prev[a]) || (!!this.padState[a] && !this.padPrev[a]); }

@@ -17,6 +17,7 @@ export const SETTINGS = {
   shake:      { def: 100, min: 0, max: 150, step: 10, unit: '%' },
   bob:        { def: 100, min: 0, max: 150, step: 10, unit: '%' },
   invert:     { def: false },
+  grenadeAutoPin: { def: false },
   ballistics: { def: false },
   difficulty: { def: 'easy', choices: ['easy', 'medium', 'hard', 'extreme'] },
 };

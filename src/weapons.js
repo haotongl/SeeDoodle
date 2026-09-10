@@ -416,7 +416,7 @@ export class Rocket extends Gun {
 
 export class Grenade extends ViewModel {
   constructor(ctx) {
-    super(ctx); this.name = 'GRENADES'; this.hint = 'hold LMB / G; full charge pulls pin - release to throw, V cancels'; this.kind = 'grenade'; this.locked = true;
+    super(ctx); this.name = 'GRENADES'; this.hint = 'hold to charge and aim - R pulls pin, release throws, RMB / V cancels or drops'; this.kind = 'grenade'; this.locked = true;
     this.scale = 0.32; this.root.scale.setScalar(this.scale);
     this.basePos.set(0.24, -0.2, -0.44); this.aimPos.copy(this.basePos);
     this.grip = new THREE.Group(); this.root.add(this.grip);

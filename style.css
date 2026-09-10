@@ -314,7 +314,7 @@ body.touch, body.touch #c { overscroll-behavior: none; touch-action: none; -webk
 #hud { --sal: env(safe-area-inset-left); --sar: env(safe-area-inset-right); --sat: env(safe-area-inset-top); --sab: env(safe-area-inset-bottom); }
 .tc { display: none; position: fixed; inset: 0; z-index: 40; pointer-events: none; mix-blend-mode: multiply; }
 #hud.touch .tc { display: block; }
-#hud.nogame .tc, .screen.show ~ .tc { display: none; }
+#hud.nogame .tc, #hud .screen.show ~ .tc { display: none; }
 .tb { box-sizing: border-box; position: absolute; display: flex; align-items: center; justify-content: center; text-align: center;
   border: 2.5px dashed var(--ink); border-radius: 50%; color: var(--ink); font-size: 15px; letter-spacing: .03em; line-height: 1;
   background: rgba(246,243,230,.3); pointer-events: auto; touch-action: none; -webkit-tap-highlight-color: transparent; opacity: .8; }
@@ -330,6 +330,7 @@ body.touch, body.touch #c { overscroll-behavior: none; touch-action: none; -webk
 .b-nade { right: calc(190px + var(--sar)); bottom: calc(146px + var(--sab)); width: 54px; height: 54px; font-size: 12px; }
 .b-nade-cancel { right: calc(198px + var(--sar)); bottom: calc(56px + var(--sab)); width: 56px; height: 56px; font-size: 11px; }
 .tb.b-nade-cancel.live { color: var(--red); border-color: var(--red); }
+.tb.b-nade-cancel.drop-target { border-style: solid; opacity: 1; outline: 2px solid currentColor; outline-offset: 3px; }
 /* weapons along the bottom edge, where either thumb can reach them. These double as the weapon
    readout, so they are squarer and quieter than the action rings and carry three states. */
 /* The row is centred on the screen until that would slide the fourth one under AIM, and from there

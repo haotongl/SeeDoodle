@@ -54,13 +54,16 @@ export class HUD {
     const armed = state === 'armed', charge = Math.round(Math.max(0, Math.min(1, status.charge || 0)) * 100);
     const remaining = Math.max(0, status.remaining || 0);
     el.nadestate.classList.toggle('armed', armed); el.nadestate.classList.toggle('urgent', armed && remaining <= 2);
-    const label = ts(armed ? 'LIVE GRENADE' : 'CHARGE'), value = armed ? ts('{} s', remaining.toFixed(1)) : charge + '%';
-    const hint = armed ? this._touch ? ts('release to throw') : ts('{}: drop - release to throw', this.key('nadeCancel'))
-      : this._touch ? ts('full charge pulls pin automatically; release to throw') : ts('full charge pulls pin; release to throw - {}: cancel', this.key('nadeCancel'));
+    const label = ts(armed ? 'LIVE GRENADE' : 'SAFE AIM'), value = armed ? ts('{} s left', remaining.toFixed(1)) : charge >= 100 ? ts('CHARGED') : ts('POWER {}%', charge);
+    const hint = armed ? this._touch ? ts('release: throw - slide + release: DROP') : ts('{}: drop - release to throw', this.key('nadeCancel'))
+      : status.autoPin ? this._touch ? ts('auto pin when full - slide + release: CANCEL') : ts('auto pin at full charge - {}: pin now - {}: cancel', this.key('nadePin'), this.key('nadeCancel'))
+      : this._touch ? ts('release: throw - slide + release: CANCEL') : ts('release to throw - {}: pull pin - {}: cancel', this.key('nadePin'), this.key('nadeCancel'));
     if (el.nadelabel.textContent !== label) el.nadelabel.textContent = label;
     if (el.nadevalue.textContent !== value) el.nadevalue.textContent = value;
     if (el.nadehint.textContent !== hint) el.nadehint.textContent = hint;
-    if (charge !== this._nadeCharge) { this._nadeCharge = charge; el.nadecharge.style.width = charge + '%'; }
+    const meter = armed ? Math.round(Math.min(1, remaining / 7) * 1000) / 10 : charge;
+    if (meter !== this._nadeCharge) { this._nadeCharge = meter; el.nadecharge.style.width = meter + '%'; }
+    const meterTitle = ts(armed ? 'fuse remaining' : 'throw power'); if (el.nadecharge.parentElement.title !== meterTitle) el.nadecharge.parentElement.title = meterTitle;
   }
   setKnifeState(status) {
     const el = this.el;
@@ -149,8 +152,8 @@ export class HUD {
   }
 }
 
-export const KB_KEYS = { fire: 'LMB', aim: 'RMB', block: 'RMB', jump: 'Space', sprint: 'Shift', slide: 'C', dash: 'C', grapple: 'Q', melee: 'F', reload: 'R', grenade: 'G', focus: 'both mouse buttons (or X)', next: 'wheel', pause: 'Esc', confirm: 'Space', score: 'Tab', nadeCancel: 'RMB / V' };
-export const PAD_KEYS = { fire: 'R2', aim: 'L2', block: 'L2', jump: '✕', sprint: 'L3', slide: '○', dash: '○', grapple: 'L1', melee: 'R1', reload: '□', grenade: 'R3', focus: 'L2 + R2', next: '△', pause: 'Options', confirm: '✕', score: 'Create', nadeCancel: 'L2 / R1' };
+export const KB_KEYS = { fire: 'LMB', aim: 'RMB', block: 'RMB', jump: 'Space', sprint: 'Shift', slide: 'C', dash: 'C', grapple: 'Q', melee: 'F', reload: 'R', grenade: 'G', focus: 'both mouse buttons (or X)', next: 'wheel', pause: 'Esc', confirm: 'Space', score: 'Tab', nadePin: 'R', nadeCancel: 'RMB / V' };
+export const PAD_KEYS = { fire: 'R2', aim: 'L2', block: 'L2', jump: '✕', sprint: 'L3', slide: '○', dash: '○', grapple: 'L1', melee: 'R1', reload: '□', grenade: 'R3', focus: 'L2 + R2', next: '△', pause: 'Options', confirm: '✕', score: 'Create', nadePin: '□', nadeCancel: 'L2 / R1' };
 export const CONTROLS_HTML = `
 <div class="cols">
   <div><div class="colhead">MOUSE + KEYBOARD</div>
@@ -164,7 +167,8 @@ export const CONTROLS_HTML = `
     <div><b>F</b> quick katana slash &nbsp; <b>R</b> reload &nbsp; <b>M</b> music</div>
     <div><b>G</b> grenade · hold it to throw further</div>
     <div><b>LMB / G</b> in grenades only: hold to charge, release to throw</div>
-    <div><b>Full charge</b> automatically pulls the pin after 1.1 seconds; the fuse lasts 7 seconds</div>
+    <div><b>R</b> pulls the pin while holding: 7-second fuse, current throw power locked</div>
+    <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
     <div><b>RMB / V</b> cancels before pulling the pin; drops a live grenade</div>
     <div><b>Tab</b> scoreboard (online) &nbsp; <b>Esc</b> pause</div>
     <div><b>Both mouse buttons</b> dash-slash once the gauge is lit</div>
@@ -181,7 +185,8 @@ export const CONTROLS_HTML = `
     <div><b>□</b> reload &nbsp; <b>△</b> next weapon</div>
     <div><b>R3 / d-pad up</b> grenade · hold to throw further</div>
     <div><b>R2 / R3</b> in grenades only: hold to charge, release to throw</div>
-    <div><b>Full charge</b> automatically pulls the pin after 1.1 seconds; the fuse lasts 7 seconds</div>
+    <div><b>□</b> pulls the pin while holding: 7-second fuse, current throw power locked</div>
+    <div><b>Full charge</b> stays safe by default; automatic pin pull is optional in settings</div>
     <div><b>L2 / R1</b> cancels or drops the grenade</div>
     <div><b>Create</b> scoreboard (online) &nbsp; <b>Options</b> pause</div>
   </div>
