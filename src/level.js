@@ -497,7 +497,7 @@ function buildUndercity(B, arena = false, team = false) {
     L.teamFacing = [-Math.PI / 2, Math.PI / 2];
     L.playerStart.copy(L.teamSpawns[0][0]);
     for (const side of [-1, 1]) {
-      box(side * 36.5, 0.15, 0, 0.5, 2.5, 8.8, { ink: side < 0 ? BL : OR, surface: 'plaster', noNav: true });
+      box(side * 36.5, 0.15, 0, 0.5, 2.5, 11.6, { ink: side < 0 ? BL : OR, surface: 'plaster', noNav: true });
       for (const z of [-6.8, 6.8]) box(side * 41.3, 0.17, z, 4.4, 0.025, 0.12, { ink: side < 0 ? BL : OR, surface: 'cloth', noCollide: true });
     }
     L.bombSites = [{ id: 'A', pos: new THREE.Vector3(0, 0.2, -34), radius: 3 }, { id: 'B', pos: new THREE.Vector3(0, 0.2, 34), radius: 3 }];
