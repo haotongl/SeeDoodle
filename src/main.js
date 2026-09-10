@@ -31,7 +31,7 @@ const knownMap = (k) => (LEVELS.some((m) => m.key === k) ? k : 'district');
 // gate that decides it - every path into the level goes through here, so a stale localStorage key or
 // a host who switches to squad survival with it picked both land back on the district.
 const arenaMaps = (ffa) => LEVELS.filter((m) => !m.teamOnly && (ffa || !m.pvpOnly));
-const matchMap = (key, mode) => isTeamMode(mode) ? (LEVELS.some((m) => m.key === key && m.teamOnly) ? key : 'depot') : playable(key, mode === 'ffa');
+const matchMap = (key, mode) => isTeamMode(mode) ? (LEVELS.some((m) => m.key === key && (m.teamOnly || m.team)) ? key : 'depot') : playable(key, mode === 'ffa');
 const playable = (k, ffa) => (arenaMaps(ffa).some((m) => m.key === k) ? k : 'district');
 let mapKey = playable(localStorage.getItem('doodle_map') || 'district', false);
 let skinKey = skinOf(localStorage.getItem('doodle_skin')).key;
@@ -39,7 +39,7 @@ let myAppearance = appearanceOf();
 try { myAppearance = appearanceOf(JSON.parse(localStorage.getItem('doodle_appearance'))); } catch (e) { /* an old or incomplete preference uses the defaults */ }
 let appearanceOpen = false, appearancePreview = null;
 let level = buildLevel(R.scene, world, mapKey, { arena: false });
-let nav = new NavGrid(world, level.bounds, 1).build();
+let nav = new NavGrid(world, level.bounds, level.navCell || 1).build();
 let loadedKey = mapKey, arenaLoaded = false;
 audio.setTune(mapKey === 'mexico' ? 'mexico' : 'district');
 // the map in play: solo uses the picked map, a match uses the host's choice; a rebuild wipes broken props
@@ -47,7 +47,7 @@ function setLevel(key, on, force = false) {
   if (!force && key === loadedKey && on === arenaLoaded) return; loadedKey = key; arenaLoaded = on;
   for (const m of level.meshes) { R.scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.traverse) m.traverse((o) => { if (o !== m && o.geometry) o.geometry.dispose(); }); }
   level.animated.length = 0; world.clear();
-  level = buildLevel(R.scene, world, key, { arena: on }); nav = new NavGrid(world, level.bounds, 1).build();
+  level = buildLevel(R.scene, world, key, { arena: on }); nav = new NavGrid(world, level.bounds, level.navCell || 1).build();
   ctx.level = level; ctx.nav = nav; if (window.__game) { window.__game.level = level; window.__game.nav = nav; }
   R.setMap?.(key);
   for (const m of level.meshes) if (m.userData.skin) m.visible = m.userData.skin === ctx.skin();
@@ -422,7 +422,7 @@ function pickSpawn(type) {
     const fits = (sp) => !world.overlapsAABB({ x: sp.x - 1.1, y: sp.y + 0.1, z: sp.z - 1.1 }, { x: sp.x + 1.1, y: sp.y + 5.2, z: sp.z + 1.1 });
     const open = spots.filter((sp) => fits(sp)); const far = open.filter((sp) => sp.distanceTo(pp) > 20);
     if (far.length) return choose(far).clone(); if (open.length) return choose(open).clone();
-    for (let i = 0; i < 200; i++) { const a = Math.random() * Math.PI * 2, r = 22 + Math.random() * 18; const c = new THREE.Vector3(clamp(pp.x + Math.cos(a) * r, -44, 44), 0, clamp(pp.z + Math.sin(a) * r, -44, 44)); c.y = world.groundBelow(c.x, 30, c.z, 40); if (c.y > -3 && fits(c)) return c; }
+    for (let i = 0; i < 200; i++) { const a = Math.random() * Math.PI * 2, r = 22 + Math.random() * 18, B = level.bounds; const c = new THREE.Vector3(clamp(pp.x + Math.cos(a) * r, B.minX + 11, B.maxX - 11), 0, clamp(pp.z + Math.sin(a) * r, B.minZ + 11, B.maxZ - 11)); c.y = world.groundBelow(c.x, 30, c.z, 40); if (c.y > -3 && fits(c)) return c; }
     return level.playerStart.clone();
   }
   let cands = spots.filter((s) => { const d = s.distanceTo(pp); return d > 14 && d < 48; });
@@ -1151,7 +1151,11 @@ function checkpointHTML() {
 }
 function wireCheckpoints(onGo) { const box = hud.el.panel.querySelector('.checkpoints'); if (!box) return; box.addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('button'); if (b) onGo(Number(b.dataset.cp)); }); }
 const mapName = (k) => (LEVELS.find((m) => m.key === k) || LEVELS[0]).name;
-function mapHTML(sel, canPick, ffa = false) { const list = arenaMaps(ffa); if (list.length < 2) return ''; return `<div class="mapsel" id="mapsel"><span>map</span>${list.map((m) => `<button type="button" class="mapbtn${m.key === sel ? ' on' : ''}" data-map="${m.key}" ${canPick ? '' : 'disabled'}>${m.name}<i>${m.blurb}</i></button>`).join('')}</div>`; }
+function mapHTML(sel, canPick, ffa = false, team = false) {
+  const list = team ? LEVELS.filter((m) => m.teamOnly || m.team) : arenaMaps(ffa); if (list.length < 2) return '';
+  const reference = sel === 'zijingang' ? `<div class="map-note">${ts('Campus-inspired layout - 240 x 180 m - 8x Depot area')}<br>${ts('Map reference')}: <a href="https://map.zju.edu.cn/" target="_blank" rel="noopener">${ts('Campus map')}</a> · &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div>` : '';
+  return `<div class="mapsel" id="mapsel"><span>${ts('map')}</span>${list.map((m) => `<button type="button" class="mapbtn${m.key === sel ? ' on' : ''}" data-map="${m.key}" ${canPick ? '' : 'disabled'}>${ts(m.name)}<i>${ts(m.blurb)}</i></button>`).join('')}</div>${reference}`;
+}
 function wireMap(onPick) { const box = hud.el.panel.querySelector('#mapsel'); if (!box) return; box.addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('.mapbtn'); if (b && !b.disabled) onPick(b.dataset.map); }); }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
@@ -1271,7 +1275,7 @@ function lobbyHTML() {
       ${appearanceHTML()}
       ${modeHTML(lobby.gameMode, host)}
       ${weaponModeHTML(ctx.weaponMode(), host)}
-      ${isTeamMode(lobby.gameMode) ? `<div class="hint">${ts('SUNLINE DEPOT')} · ${ts('opposite bases, twin courtyards and covered routes')}</div>` : mapHTML(playable(lobby.map || mapKey, !isCoop), host, !isCoop)}
+      ${mapHTML(matchMap(lobby.map || mapKey, lobby.gameMode), host, !isCoop, isTeamMode(lobby.gameMode))}
       ${ballHTML(lobby.ballistics, host)}
       ${diffHTML(ctx.difficulty(), host)}
       ${isCoop ? '' : mobHTML(lobby.mob || 'mid', host)}
@@ -1312,7 +1316,7 @@ function wireOnline() {
   if (q('backBtn')) q('backBtn').addEventListener('click', () => { lobby.status = ''; lobby.rejoinCode = null; screen = 'main'; showStart(); });
   if (q('refreshBtn')) { q('refreshBtn').addEventListener('click', () => refreshLobbies()); if (!lobbyList && !listBusy) refreshLobbies(); }
   if (q('lobbyRows')) q('lobbyRows').addEventListener('click', (e) => { const b = e.target.closest('button[data-join]'); if (b) { lockButtons(box); joinLobby(b.dataset.join); } });
-  wireMap((k) => { if (net.isHost) { lobby.map = k; broadcastLobby(); } });
+  wireMap((k) => { if (net.isHost) { lobby.map = matchMap(k, lobby.gameMode); broadcastLobby(); } });
   if (q('startBtn')) q('startBtn').addEventListener('click', () => { if (net.isHost) hostStart(); else { net.send('startreq', {}); setStatus('asking the host to start…'); } });
   if (q('leaveBtn')) q('leaveBtn').addEventListener('click', () => { lobby.rejoinCode = null; leaveOnline(''); });
 }

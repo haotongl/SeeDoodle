@@ -171,6 +171,8 @@ canvas#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: bloc
 .mapbtn i { font-style: normal; font-size: 14px; opacity: .75; }
 .mapbtn:hover { opacity: .85; }
 .mapbtn.on { opacity: 1; color: var(--paper); background: var(--ink); }
+.map-note { margin: 8px auto 0; max-width: 560px; font-size: 12px; line-height: 1.5; opacity: .65; text-align: center; }
+.map-note a { color: inherit; }
 /* the mode picker sits above the map picker and reads the same way */
 .modesel { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: wrap; }
 .modesel > span { font-size: 20px; opacity: .75; }

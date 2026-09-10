@@ -54,6 +54,18 @@ Picked by the host in the lobby, before the match starts:
 - **SQUAD** — co-op against the waves. Harder than solo and it scales with the squad: bigger wave
   counts, a higher live-enemy ceiling, tougher hits and more pickups per wave. Downed teammates show
   struck through on the scoreboard, and the run ends when the whole squad is down at once.
+- **TEAM DEATHMATCH** — two teams, opposite spawn bases, matching team uniforms and no friendly
+  fire. First to 50 kills, or the higher score after eight minutes. Respawn takes three seconds;
+  two seconds of protection ends early on attacking. A tied time limit is a draw.
+- **DEMOLITION** — one life per round. Attackers carry one C4 to A or B and hold B for five
+  seconds to plant; defenders hold B for seven seconds to defuse. N drops the carried bomb.
+  Touch controls provide contextual buttons. The round lasts two minutes before planting and
+  the fuse lasts 40 seconds. First to five wins; sides switch after round four. Dead players
+  spectate teammates, and late arrivals enter the next round.
+
+The host can add bots and arrange teams before starting either team mode. Bots navigate the same
+level, fight through the same damage checks, and can carry, plant and defuse C4. Weapon restrictions
+are independent of the game mode; the knife rule allows unlimited grenades.
 
 ### Maps
 
@@ -69,6 +81,31 @@ which matters because HARD does not give you one. Two players standing on random
 other about **19%** of the time, against **44%** on the district. That is the whole design brief: no
 big open middle, no rooftop that overlooks everything, and a fight that is decided by which corner
 you came around.
+
+**SUNLINE DEPOT** is the compact 84 x 64 m team arena, with sheltered opposite bases and two bomb
+sites. **ZIJINGANG EAST** adds a 240 x 180 m block inspired by Zhejiang University's Zijingang campus:
+East 1 to the north, East 2 to the southeast, the cultural corridor immediately west of East 2,
+the low Yongman waterside lecture hall, and Qizhen Lake along the western edge. Its rectangular
+extent is 43,200 square metres, about 8.04 times Depot's area, including water and buildings.
+The campus is available in solo, squad, free-for-all and both team modes. The host selects the map
+for the room; Classic Ink and Sunlit Toon are both supported.
+
+This is a compressed game interpretation of one block, not the whole campus or a 1:1 survey.
+Courtyards, lakefront paths, the wooden bridge and upper walkways provide different routes.
+Entrances, accessible floors, stairs, cover, bases and A/B positions are adapted for play.
+Ground-floor rooms and selected walkways are accessible; upper teaching floors are scenery.
+
+Layout references are the [official campus map](https://map.zju.edu.cn/index.html) and
+[OpenStreetMap contributors](https://www.openstreetmap.org/copyright), whose data is available
+under ODbL. The footprint sources include East 1 [way 161325315](https://www.openstreetmap.org/way/161325315),
+East 2 [way 161325385](https://www.openstreetmap.org/way/161325385), the cultural corridor
+[way 1122111924](https://www.openstreetmap.org/way/1122111924), and the waterside lecture hall
+[way 161325273](https://www.openstreetmap.org/way/161325273). Official building photographs identify
+the white-gray facade bands, dark glass stair towers, and Yongman's pale entrance and curved roof.
+The university's [cultural corridor report](http://www.news.zju.edu.cn/2022/0530/c1043a2568048/page.htm)
+provides column, glass railing and wood-platform details. Official and OSM floor counts for East 1
+differ; the game does not claim measured floor accuracy. Reference photographs are not bundled as
+textures: the map uses original procedural geometry and the game's locally served materials.
 
 ## Versus: movement, and supply
 

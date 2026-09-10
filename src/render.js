@@ -16,7 +16,7 @@ export const INK_COLORS = [
   new THREE.Vector3(0.44, 0.49, 0.06), // olive pen
 ];
 export const LIGHT_WORLD = new THREE.Vector3(0.38, 0.82, 0.42).normalize();
-export const SURFACE = { INK: 0, PLASTER: 1, GROUND: 2, STONE: 3, WOOD: 4, METAL: 5, GLASS: 6, FOLIAGE: 7, SKIN: 8, CLOTH: 9 };
+export const SURFACE = { INK: 0, PLASTER: 1, GROUND: 2, STONE: 3, WOOD: 4, METAL: 5, GLASS: 6, FOLIAGE: 7, SKIN: 8, CLOTH: 9, WATER: 10, CERAMIC: 11 };
 export const shared = { uLightDir: { value: new THREE.Vector3(0, 1, 0) }, uTime: { value: 0 }, uToon: { value: 0 } };
 
 const inkVert = /* glsl */`
@@ -255,6 +255,7 @@ uniform float uSlow;
 uniform float uLowHp;
 uniform float uViewOpacity;
 uniform float uMapMood;
+uniform vec3 uHaze;
 uniform vec3 uInks[${INK_COLORS.length}];
 uniform mat4 uInvProj;
 uniform mat4 uInvView;
@@ -330,8 +331,14 @@ vec3 surfaceColor(float packed, vec3 p, vec2 uv, float brush) {
     else if (ink < 4.5) base = vec3(0.455, 0.271, 0.180);
     else base = vec3(0.298, 0.169, 0.125);
     base *= 0.99 + brush * 0.02;
-  } else {
+  } else if (kind < 9.5) {
     base = mix(tint, vec3(0.95, 0.91, 0.83), 0.14) * (0.975 + brush * 0.05);
+  } else if (kind < 10.5) {
+    float ripple = sin(p.x * 1.15 + p.z * 0.45 + uTime * 0.65) * sin(p.z * 0.72 - uTime * 0.38);
+    base = mix(vec3(0.16, 0.39, 0.36), vec3(0.35, 0.58, 0.52), broad);
+    base += vec3(0.045, 0.055, 0.05) * smoothstep(0.68, 0.96, ripple);
+  } else {
+    base = mix(vec3(0.81, 0.83, 0.80), vec3(0.92, 0.92, 0.86), broad) * (0.99 + brush * 0.025);
   }
   return base;
 }
@@ -393,7 +400,7 @@ void main() {
              + occlusion(vUv + vec2(0.0, aoStep.y), d, radius) + occlusion(vUv - vec2(0.0, aoStep.y), d, radius);
     col *= 1.0 - ao * 0.065;
     col = mix(col, col * vec3(0.67, 0.79, 0.87), uMapMood * 0.3);
-    float haze = smoothstep(38.0, 210.0, d) * 0.72;
+    float haze = smoothstep(uHaze.x, uHaze.y, d) * uHaze.z;
     col = mix(col, mix(vec3(0.83, 0.85, 0.80), sky, 0.35), haze);
   }
   // Keep contours delicate and neutral; the character's saturated uniform carries team identity.
@@ -431,7 +438,7 @@ export class InkRenderer {
         uTime: { value: 0 }, uNear: { value: this.camera.near }, uFar: { value: this.camera.far }, uHurt: { value: 0 }, uFlash: { value: 0 }, uSlow: { value: 0 },
         uLowHp: { value: 0 }, uViewOpacity: { value: -1 }, uLineSpacing: { value: 60 }, uPaper: { value: new THREE.Vector3(0.965, 0.955, 0.905) }, uInks: { value: INK_COLORS },
         uInvProj: { value: new THREE.Matrix4() }, uInvView: { value: new THREE.Matrix4() },
-        tSurface: { value: fallback }, uMapMood: { value: 0 },
+        tSurface: { value: fallback }, uMapMood: { value: 0 }, uHaze: { value: new THREE.Vector3(38, 210, 0.72) },
       },
       vertexShader: postVert, fragmentShader: postFrag, depthTest: false, depthWrite: false,
     });
@@ -464,6 +471,8 @@ export class InkRenderer {
   setMap(key) {
     this.map = key || 'district';
     this.post.uniforms.uMapMood.value = this.map === 'undercity' ? 1 : 0;
+    // The campus spans eight Depot arenas; keep its distant route landmarks legible.
+    this.post.uniforms.uHaze.value.set(...(this.map === 'zijingang' ? [75, 360, 0.5] : [38, 210, 0.72]));
   }
   resize() {
     const w = Math.max(2, this.fixedSize?.width || window.innerWidth), h = Math.max(2, this.fixedSize?.height || window.innerHeight);

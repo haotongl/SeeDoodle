@@ -193,7 +193,10 @@ export class Player {
   }
   die() { this.cancelGrenade(); this.cancelKnife(); this.alive = false; this.deathT = 0; audio.death(); this.detachGrapple(false); this.ctx.game.onPlayerDeath(); }
   idleCam(t) {
-    const c = this.camera; c.position.set(Math.sin(t * 0.08) * 70, 30 + Math.sin(t * 0.23) * 4, Math.cos(t * 0.08) * 70); c.lookAt(0, 10, 0); this.rig.visible = false;
+    const c = this.camera, preview = this.ctx.level.previewCam;
+    if (preview) { const [x, y, z] = preview.target, a = t * (preview.speed || .025); c.position.set(x + Math.sin(a) * preview.radius, preview.height, z + Math.cos(a) * preview.radius); c.lookAt(x, y, z); }
+    else { c.position.set(Math.sin(t * 0.08) * 70, 30 + Math.sin(t * 0.23) * 4, Math.cos(t * 0.08) * 70); c.lookAt(0, 10, 0); }
+    this.rig.visible = false;
     this.eye.copy(c.position); this.center.copy(c.position); c.getWorldDirection(this.forward); this.right.set(this.forward.z, 0, -this.forward.x).normalize();
     this.aimOrigin.copy(c.position); this.aimFwd.copy(this.forward); this.aimRight.copy(this.right);
     if (Math.abs(c.fov - 70) > 0.01) { c.fov = 70; c.updateProjectionMatrix(); }
@@ -308,7 +311,8 @@ export class Player {
     b.noSnap = this.grapple.state === 'on' || b.vel.y > 0.5;
     const spd = b.vel.length(); if (spd > 48) b.vel.multiplyScalar(48 / spd);
     ctx.world.moveBody(b, dt);
-    if (b.pos.y < -12 || Math.abs(b.pos.x) > 95 || Math.abs(b.pos.z) > 95) {
+    const bounds = ctx.level.bounds;
+    if (b.pos.y < (ctx.level.fallY ?? -12) || b.pos.x < bounds.minX - 8 || b.pos.x > bounds.maxX + 8 || b.pos.z < bounds.minZ - 8 || b.pos.z > bounds.maxZ + 8) {
       this.detachGrapple(false); b.pos.copy(ctx.level.playerStart); b.vel.set(0, 0, 0); this.takeDamage(20, null); if (this.onFall) this.onFall();
       ctx.hud.message('OFF THE PAGE', 'redrawn at the start', 1.8);
     }

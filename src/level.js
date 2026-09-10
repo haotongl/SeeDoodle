@@ -10,7 +10,7 @@ import { buildHumanoid } from './enemies.js';
 
 // Doodle Mexico is built and kept, but off the menu until it is ready; flip this to offer it again
 export const MEXICO_READY = false;
-export const LEVELS = [{ key: 'district', name: 'DOODLE DISTRICT', blurb: 'streets, rooftops and fire escapes' }, { key: 'undercity', name: 'THE UNDERCITY', blurb: 'flooded tunnels, shuttered shops and metro echoes', pvpOnly: true }, { key: 'depot', name: 'SUNLINE DEPOT', blurb: 'opposite bases, twin courtyards and covered routes', pvpOnly: true, teamOnly: true }, ...(MEXICO_READY ? [{ key: 'mexico', name: 'DOODLE MEXICO', blurb: 'a sun-baked plaza · piñatas, tacos and mariachi' }] : [])];
+export const LEVELS = [{ key: 'district', name: 'DOODLE DISTRICT', blurb: 'streets, rooftops and fire escapes' }, { key: 'undercity', name: 'THE UNDERCITY', blurb: 'flooded tunnels, shuttered shops and metro echoes', pvpOnly: true }, { key: 'depot', name: 'SUNLINE DEPOT', blurb: 'opposite bases, twin courtyards and covered routes', pvpOnly: true, teamOnly: true }, { key: 'zijingang', name: 'ZIJINGANG EAST', blurb: 'East 1, East 2 and the Qizhen lakeside', team: true }, ...(MEXICO_READY ? [{ key: 'mexico', name: 'DOODLE MEXICO', blurb: 'a sun-baked plaza · piñatas, tacos and mariachi' }] : [])];
 
 function createBuilder(scene, world) {
   const geos = {}; const L = { rings: [], spawns: [], snipers: [], pickups: [], animated: [], meshes: [], playerStart: new THREE.Vector3(0, 0, 42), bounds: { minX: -55, maxX: 55, minZ: -55, maxZ: 55 }, arenaSpawns: [], grappleMovers: [], breakables: [], key: 'district' };
@@ -664,7 +664,244 @@ function buildDepot(B) {
   return B.finish();
 }
 
+// A compressed, north-up adaptation of East 1 / East 2 and the Qizhen lakeside. The
+// footprints follow OSM; entrances, cover and playable balconies are match-design choices.
+function buildZijingang(B) {
+  const { L, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, collider, addGeo, spawn, sniper, pickup } = B;
+  L.key = 'zijingang'; L.bounds = { minX: -120, maxX: 120, minZ: -90, maxZ: 90 }; L.navCell = 1.5; L.fallY = -5;
+  L.previewCam = { target: [0, 1, 0], radius: 158, height: 105, speed: 0.018 };
+  L.zones = [{ id: 'east1', name: 'EAST 1', x: 0, z: -46 }, { id: 'east2', name: 'EAST 2', x: 63, z: 38 }, { id: 'lake', name: 'QIZHEN LAKE', x: -104, z: 36 }, { id: 'corridor', name: 'CULTURE CORRIDOR', x: 26, z: 38 }];
+  L.referenceNotes = 'OSM East 1 / East 2 / student cultural corridor footprints and the official ZJU campus map; compressed to 240 x 180. Routes, entrances, balconies, cover and objective positions are gameplay adaptations, not a campus survey.';
+  const stone = { surface: 'stone', ink: INK.BROWN }, pale = { surface: 'ceramic', ink: INK.BLACK }, dark = { surface: 'metal', ink: INK.BLACK };
+  const glass = { surface: 'glass', ink: INK.TEAL, noCollide: true }, detail = { noCollide: true, noNav: true };
+  const stairGuards = (x, z, dir, width, run = 0.85) => {
+    const dx = dir === '-x' ? -1 : 0, dz = dir === '+z' ? 1 : 0;
+    // Side-entry onto a high tread is physically impossible even when a coarse nav cell
+    // thinks the rise is a valid step. Visible stepped parapets make the approach explicit.
+    for (let i = 0; i < 7; i++) for (const s of [-1, 1]) {
+      const along = (i * 2 + 1) * run, side = s * (width / 2 + 0.13);
+      box(x + dx * along + dz * side, 0, z + dz * along + (dx ? side : 0), dx ? run * 2 : 0.22, (i + 1) * 0.6 + 1, dz ? run * 2 : 0.22, { ...pale, noNav: true });
+    }
+  };
+
+  // Separate land strips leave the lake genuinely unsupported. A stepped stone embankment
+  // and low rail show exactly where that physical shoreline is, including its short returns.
+  box(-60, -0.9, 0, 120, 0.08, 180, { surface: 'water', ink: INK.TEAL, noCollide: true });
+  const shore = [-100, -100, -101, -102, -102, -97, -92, -78, -62, -52, -54, -58, -61, -71, -84];
+  for (let i = 0; i < shore.length; i++) {
+    const x = shore[i], z1 = -90 + i * 12, z2 = z1 + 12;
+    box((x + 120) / 2, -1.4, (z1 + z2) / 2, 120 - x, 1.4, 12, { surface: 'ground', ink: INK.OLIVE });
+    box(x + 9, 0.012, (z1 + z2) / 2, 18, 0.022, 12, { ...stone, ...detail });
+    box(x + 0.13, -1.5, (z1 + z2) / 2, 0.3, 1.65, 12, { ...stone, noNav: true });
+    rail(x + 0.35, i === 9 ? z1 + 6 : z1, x + 0.35, z2, 0.15);
+    if (i && shore[i - 1] !== x) {
+      const a = Math.min(x, shore[i - 1]), b = Math.max(x, shore[i - 1]);
+      box((a + b) / 2, -1.5, z1, b - a, 1.65, 0.3, { ...stone, noNav: true });
+      if (i === 7) { rail(a + 0.35, z1, -91, z1, 0.15); rail(-85, z1, b + 0.35, z1, 0.15); }
+      else rail(a + 0.35, z1, b + 0.35, z1, 0.15);
+    }
+  }
+  const paving = (x1, z1, x2, z2, surface = 'stone', ink = INK.BROWN) => box((x1 + x2) / 2, 0.036, (z1 + z2) / 2, x2 - x1, 0.022, z2 - z1, { ...detail, surface, ink });
+  paving(-80, -86, 97.8, -77); paving(-80, -17, 97.8, 10); paving(-37, 65, 97.8, 87);
+  paving(98, -90, 112, 90, 'ground', INK.BLACK);
+  paving(93, -90, 97.8, 90); paving(112.2, -90, 119, 90);
+  for (let z = -83; z < 90; z += 12) box(105, 0.075, z, 0.18, 0.022, 5, { surface: 'plaster', ink: INK.ORANGE, ...detail });
+  for (const z of [-10, 68]) for (let x = 99; x < 112; x += 1.7) box(x, 0.077, z, 0.8, 0.022, 4, { ...pale, ...detail });
+  for (const [x1, z1, x2, z2] of [[-42, 39, -15, 58], [-34, 65, -9, 82], [-38, 12, -14, 19], [-58, -52, -39, -40], [-25, -52, -12, -40], [46, -54, 62, -39], [48, 29, 62, 47], [72, 41, 79, 49], [113, -88, 118, 88]])
+    box((x1 + x2) / 2, 0.065, (z1 + z2) / 2, x2 - x1, 0.024, z2 - z1, { surface: 'foliage', ink: INK.GREEN, ...detail });
+  // Campus hedges, railings and planting beds mark the cropped block without a sky lid.
+  for (const [x, z, w, d] of [[10, -89.5, 218, 0.65], [18, 89.5, 201, 0.65], [119.5, 0, 0.65, 179]]) {
+    box(x, 0, z, w, 0.75, d, { ...stone, noNav: true });
+    box(x, 0.75, z, w - (w > d ? 0.1 : 0), 1.5, d + 0.9, { surface: 'foliage', ink: INK.GREEN, noNav: true });
+  }
+
+  const facade = (x1, z1, x2, z2, h) => {
+    const rows = Math.max(1, Math.round((h - 4.2) / 3));
+    for (let f = 0; f < rows; f++) {
+      const y = 4.7 + f * (h - 4.9) / rows;
+      for (const z of [z1 - 0.27, z2 + 0.27]) {
+        box((x1 + x2) / 2, y, z, x2 - x1 - 1.4, 1.9, 0.08, glass);
+        for (let x = x1 + 1.3; x < x2 - 0.6; x += 3.4) box(x, y - 0.08, z + (z === z1 - 0.27 ? -0.075 : 0.075), 0.1, 2.08, 0.13, { ...pale, ...detail });
+      }
+      for (const x of [x1 - 0.27, x2 + 0.27]) {
+        box(x, y, (z1 + z2) / 2, 0.08, 1.9, z2 - z1 - 1.4, glass);
+        for (let z = z1 + 1.3; z < z2 - 0.6; z += 3.4) box(x + (x === x1 - 0.27 ? -0.075 : 0.075), y - 0.08, z, 0.13, 2.08, 0.1, { ...pale, ...detail });
+      }
+    }
+    for (const z of [z1 - 0.3, z2 + 0.3]) box((x1 + x2) / 2, h - 0.32, z, x2 - x1 + 0.65, 0.18, 0.18, { ...pale, ...detail });
+  };
+  const wing = (x1, z1, x2, z2, h, doors = {}) => {
+    const openings = xs => (xs || []).map(x => [x - 2.3, x + 2.3, 0, 3.4]);
+    wallX(x1, x2, z1, 0, 4, 0.48, openings(doors.n), pale);
+    wallX(x1, x2, z2, 0, 4, 0.48, openings(doors.s), pale);
+    wallZ(z1 + 0.24, z2 - 0.24, x1, 0, 4, 0.48, openings(doors.w), pale);
+    wallZ(z1 + 0.24, z2 - 0.24, x2, 0, 4, 0.48, openings(doors.e), pale);
+    slab(x1 - 0.28, z1 - 0.28, x2 + 0.28, z2 + 0.28, 4, 0.28, { ...pale, noNav: true });
+    box((x1 + x2) / 2, 4.06, (z1 + z2) / 2, x2 - x1 + 0.48, h - 4.06, z2 - z1 + 0.48, { ...pale, noNav: true });
+    slab(x1 - 0.6, z1 - 0.6, x2 + 0.6, z2 + 0.6, h + 0.18, 0.2, { ...stone, noNav: true });
+    facade(x1, z1, x2, z2, h);
+  };
+  // East 1 retains the long north/south wings and transverse bridges of its real footprint.
+  wing(-78, -76, 82, -61, 15.4, { n: [-66, -25, 55], s: [-66, -25, 55], w: [-68], e: [-68] });
+  wing(-78, -33, 82, -18, 15.4, { n: [-66, -25, 9, 55], s: [-66, -25, 9, 55], w: [-25], e: [-25] });
+  wing(19, -60.65, 32, -33.35, 15.4, { n: [25.5], s: [25.5], w: [-47], e: [-47] });
+  for (const x of [-74, -33, 67, 79]) {
+    slab(x - 1.8, -60.6, x + 1.8, -33.4, 4.2, 0.35, { ...stone, noNav: x > 0 });
+    for (const z of [-57, -37]) box(x, 0, z, 0.5, 3.85, 0.5, { ...pale, noNav: true });
+    const za = x < 0 ? -55.8 : -60.6, zb = x < 0 ? -38.2 : -33.4;
+    rail(x - 1.8, za, x - 1.8, zb, 4.2); rail(x + 1.8, za, x + 1.8, zb, 4.2);
+  }
+  // Two generous stair flights lead to a real balcony loop. The high teaching-block roofs
+  // remain out of navigation, so bots never choose decorative upper storeys as destinations.
+  for (const [x1, x2] of [[-76, -75.8], [-72.2, -34.8], [-31.2, 17.5]]) {
+    slab(x1, -59.6, x2, -55.8, 4.2, 0.32, stone); slab(x1, -38.2, x2, -34.4, 4.2, 0.32, stone);
+  }
+  rail(-76, -55.8, -69, -55.8, 4.2); rail(-63, -55.8, 17.5, -55.8, 4.2);
+  rail(-76, -38.2, -12, -38.2, 4.2); rail(-6, -38.2, 17.5, -38.2, 4.2);
+  stairs(-66, 0, -44.6, '-z', 14, 4.2, { rise: 0.3, run: 0.8 });
+  stairs(-9, 0, -49.4, '+z', 14, 4.2, { rise: 0.3, run: 0.8 });
+  for (const x of [-52, -11, 45]) {
+    box(x, 0, -68.4, 7, 1.45, 2.2, { surface: 'wood', ink: INK.BROWN, noNav: true });
+    box(x, 0, -25.4, 7, 1.45, 2.2, { surface: 'wood', ink: INK.BROWN, noNav: true });
+  }
+  for (const x of [-66, 9, 67]) {
+    box(x, 4.06, -17.3, 4.3, 13, 1.3, { ...dark, noNav: true });
+    box(x, 4.35, -16.59, 3.65, 12.4, 0.1, glass);
+    for (let y = 4.4; y < 17; y += 1.55) box(x, y, -16.47, 3.85, 0.09, 0.11, { ...pale, ...detail });
+    box(x, 17.1, -17.3, 4.8, 0.22, 1.8, { ...pale, ...detail });
+  }
+
+  // The southwest annex is low and polygonal, unlike the distant administrative tower.
+  // Two overlapping inset boxes approximate its collision volume without square corners
+  // protruding beyond the twelve-sided visual shell.
+  const ax = -71, az = -4, ar = 11;
+  cyl(ax, 0, az, ar, 5.3, { ...pale, noCollide: true, seg: 12 });
+  collider(ax, 0, az, 18, 5.3, 11.8, { noNav: true }); collider(ax, 0, az, 11.8, 5.3, 18, { noNav: true });
+  cyl(ax, 5.35, az, ar + 0.6, 0.35, { ...stone, noCollide: true, seg: 12 });
+  const annexRoof = new THREE.SphereGeometry(ar + 0.6, 24, 8, 0, TAU, 0, Math.PI / 2);
+  annexRoof.scale(1, 0.12, 1); annexRoof.translate(ax, 5.7, az); addGeo(annexRoof, INK.BLACK, 'ceramic');
+  box(-61.5, 0, 1.5, 7, 6.8, 8, { surface: 'plaster', ink: INK.BROWN, noNav: true });
+  box(-61.5, 0.12, 5.56, 4.3, 4.8, 0.08, { ...dark, ...detail });
+  for (const z of [-10, 2]) {
+    const g = new THREE.BoxGeometry(0.36, 5.9, 0.4); g.rotateZ(-0.3); g.translate(-82.1, 2.7, z); addGeo(g, INK.BLACK, 'ceramic');
+  }
+  for (let i = 0; i < 12; i++) {
+    const a = TAU * i / 12, g = new THREE.BoxGeometry(4.6, 2.6, 0.1);
+    g.rotateY(-a); g.translate(ax + Math.sin(a) * 10.7, 2.75, az + Math.cos(a) * 10.7); addGeo(g, INK.TEAL, 'glass');
+  }
+
+  // East 2 has one enclosed quadrangle in the surveyed footprint, with a lower glazed
+  // eastern link. Wide portals leave both objectives reachable without jumping or grappling.
+  wing(33, 13, 91, 24, 10.4, { n: [44, 73], s: [44, 73], w: [18.5], e: [18.5] });
+  wing(33, 52, 91, 63, 10.4, { n: [44, 73], s: [44, 73], w: [57.5], e: [57.5] });
+  wing(33, 24.4, 42, 51.6, 10.4, { w: [37], e: [37], n: [37.5], s: [37.5] });
+  slab(83.5, 24.4, 91, 51.6, 4.2, 0.35, stone);
+  slab(83, 24.1, 91.5, 51.9, 8, 0.3, { ...pale, noNav: true });
+  for (const z of [26, 33, 43, 50]) for (const x of [84, 90.5]) box(x, 0, z, 0.45, 7.7, 0.45, { ...pale, noNav: true });
+  rail(83.5, 24.4, 83.5, 51.6, 4.2); rail(91, 24.4, 91, 35, 4.2); rail(91, 41, 91, 51.6, 4.2);
+  stairs(103, 0, 38, '-x', 14, 4.2, { rise: 0.3, run: 0.85 });
+  stairGuards(103, 38, '-x', 4.2);
+  for (const z of [18.5, 57.5]) for (const x of [55, 83]) box(x, 0, z, 5, 1.45, 2.2, { surface: 'wood', ink: INK.BROWN, noNav: true });
+
+  // The two-level student corridor links the teaching buildings to the southern plaza.
+  slab(21, -17.5, 30.5, 83, 4.2, 0.32, stone);
+  slab(20.5, -17.9, 31, 83.4, 7.7, 0.25, { ...pale, noNav: true });
+  for (let z = -14; z <= 81; z += 10.5) for (const x of [21.4, 30.1]) if (!(x === 30.1 && z === 7)) box(x, 0, z, 0.45, 7.45, 0.45, { ...pale, noNav: true });
+  for (const z of [4, 10]) box(30.1, 0, z, 0.45, 7.45, 0.45, { ...pale, noNav: true });
+  rail(21, -17.5, 21, 68, 4.2); rail(21, 74, 21, 83, 4.2);
+  rail(30.5, -17.5, 30.5, 4, 4.2); rail(30.5, 10, 30.5, 83, 4.2);
+  stairs(39, 0, -4.9, '+z', 14, 4.2, { rise: 0.3, run: 0.85 });
+  slab(30.5, 7, 41.1, 10, 4.2, 0.32, stone); stairGuards(39, -4.9, '+z', 4.2);
+  stairs(10, 0, 58.9, '+z', 14, 4.2, { rise: 0.3, run: 0.85 });
+  slab(7.9, 70.8, 21, 74, 4.2, 0.32, stone); stairGuards(10, 58.9, '+z', 4.2);
+  for (const [x, z] of [[24, 13], [27, 47]]) box(x, 4.2, z, 3.5, 2.2, 0.35, { surface: 'wood', ink: INK.BROWN, noNav: true });
+  for (const z of [0, 27, 61]) box(25.7, 0, z, 3.6, 1.5, 1.1, { surface: 'wood', ink: INK.BROWN, noNav: true });
+
+  // A white colonnade bends beside the lake. The ground-level route remains visible and
+  // navigable beneath it; each butt joint shares an edge rather than overlapping roof faces.
+  const walk = [[-46, 4, 15, 9], [-32, 13, 24, 9], [-13, 22, 31, 9], [4, 31, 15, 9]];
+  for (const [x, z, w, d] of walk) {
+    slab(x - w / 2, z - d / 2, x + w / 2, z + d / 2, 3.8, 0.24, { ...pale, noNav: true });
+    for (const dx of [-w / 2 + 1, w / 2 - 1]) for (const dz of [-d / 2 + 0.6, d / 2 - 0.6]) cyl(x + dx, 0, z + dz, 0.24, 3.56, { ...pale, noNav: true, seg: 8 });
+  }
+  // A short footbridge crosses an inlet west of the teaching buildings, away from either
+  // team spawn. Its stone abutments and rail match the embankment around the real lake.
+  slab(-91, -13, -85, 18, 0.2, 0.65, stone); slab(-91, 18, -44, 24, 0.2, 0.65, stone);
+  rail(-91, -13, -91, 24, 0.2); rail(-85, -13, -85, 18, 0.2); rail(-85, 18, -44, 18, 0.2); rail(-91, 24, -44, 24, 0.2);
+
+  const planter = (x, z, w = 5, d = 3) => {
+    box(x, 0, z, w, 0.65, d, { ...stone, noNav: true });
+    box(x, 0.67, z, w - 0.35, 0.12, d - 0.35, { surface: 'ground', ink: INK.OLIVE, ...detail });
+    const n = Math.max(2, Math.floor(w / 2));
+    for (let i = 0; i < n; i++) sphere(x - w * 0.35 + i * w * 0.7 / (n - 1), 1, z, 0.62, { surface: 'foliage', ink: INK.GREEN });
+  };
+  const tree = (x, z, i) => {
+    const h = 4.8 + i % 3 * 0.4, r = 2.3 + i % 4 * 0.2;
+    cyl(x, 0, z, 0.24, h, { surface: 'wood', ink: INK.BROWN, noNav: true, seg: 7 });
+    sphere(x, h + 0.6, z, r, { surface: 'foliage', ink: i % 5 === 0 ? INK.OLIVE : INK.GREEN, seg: 7 });
+    sphere(x - 0.8, h + 1.6, z + 0.4, r * 0.7, { surface: 'foliage', ink: INK.GREEN, seg: 7 });
+  };
+  const bench = (x, z, alongX = true) => {
+    const w = alongX ? 3 : 0.65, d = alongX ? 0.65 : 3;
+    box(x, 0.48, z, w, 0.14, d, { surface: 'wood', ink: INK.BROWN, ...detail });
+    box(x + (alongX ? 0 : -0.27), 0.66, z + (alongX ? -0.27 : 0), alongX ? 3 : 0.1, 0.7, alongX ? 0.1 : 3, { surface: 'wood', ink: INK.BROWN, ...detail });
+    for (const s of [-1, 1]) box(x + (alongX ? s : 0), 0, z + (alongX ? 0 : s), 0.12, 0.5, 0.45, { ...dark, ...detail });
+    collider(x, 0, z, w, 0.9, d, { noNav: true });
+  };
+  for (const [x, z, w, d] of [[-47, -46, 9, 7], [-16, -46, 8, 7], [9, -45, 5, 8], [51, -47, 9, 8], [59, 34, 8, 6], [73, 45, 8, 4], [-14, 0, 13, 5], [7, 15, 7, 5], [4, 50, 9, 5], [-25, 61, 10, 5], [59, 71, 14, 3], [63, -82, 13, 3]]) planter(x, z, w, d);
+  const trees = [[-87, -70], [-86, -50], [-85, -31], [-55, -7], [-41, -8], [-20, -9], [1, -9], [52, 3], [72, 3], [87, -9], [87, -48], [60, -47], [-46, -46], [-16, -46], [57, 43], [73, 32], [-41, 29], [-40, 46], [-49, 59], [-60, 75], [-23, 73], [-3, 77], [12, 48], [7, 60], [46, 71], [84, 71]];
+  for (let z = -80; z <= 80; z += 20) trees.push([116, z]);
+  trees.forEach(([x, z], i) => tree(x, z, i));
+  for (const [x, z, dir] of [[-87, -61, false], [-86, -41, false], [-51, 15, false], [-42, 37, false], [-51, 67, false], [-39, -42, true], [0, -42, true], [50, 44, false], [73, 29, true], [-5, 3, true], [15, 53, false], [76, 69, true]]) bench(x, z, dir);
+  for (const [x, z] of [[-89, -21], [-43, 23], [-54, 70], [91, -80], [91, -5], [93, 76], [5, 41]]) {
+    cyl(x, 0, z, 0.12, 5.6, { ...dark, noNav: true, seg: 6 });
+    box(x + 0.4, 5.45, z, 1.2, 0.2, 0.6, { ...pale, ...detail });
+  }
+  // Low-poly cycle racks and frames identify the teaching precinct without adding tiny
+  // collision traps to the pedestrian routes.
+  for (const z of [-7, 68]) for (let i = 0; i < 6; i++) {
+    const x = 76 + i * 1.55;
+    box(x, 0, z, 0.06, 0.7, 1.9, { ...dark, ...detail });
+    for (const dz of [-0.72, 0.72]) { const g = new THREE.TorusGeometry(0.42, 0.055, 5, 12); g.rotateY(Math.PI / 2); g.translate(x + 0.3, 0.46, z + dz); addGeo(g, INK.BLACK, 'metal'); }
+    box(x + 0.3, 0.85, z, 0.09, 0.1, 1.45, { surface: 'metal', ink: i % 2 ? INK.TEAL : INK.ORANGE, ...detail });
+    box(x + 0.3, 0.88, z - 0.65, 0.65, 0.08, 0.08, { ...dark, ...detail });
+  }
+
+  // Wall-mounted lettering is ordinary merged geometry, so wayfinding also works offline
+  // and never adds screen-space clutter or depends on a remote font.
+  const glyphs = { E: ['111', '100', '110', '100', '111'], '1': ['010', '110', '010', '010', '111'], '2': ['111', '001', '111', '100', '111'], A: ['010', '101', '111', '101', '101'], B: ['110', '101', '110', '101', '110'] };
+  const sign = (x, y, z, text, facing = 1) => {
+    box(x, y, z, text.length * 1.08 + 0.8, 1.65, 0.12, { ...dark, ...detail });
+    for (let n = 0; n < text.length; n++) for (let row = 0; row < 5; row++) for (let col = 0; col < 3; col++) if (glyphs[text[n]][row][col] === '1')
+      box(x + (n - (text.length - 1) / 2) * 1.08 + (col - 1) * 0.24, y + (4 - row) * 0.24 + 0.25, z + facing * 0.1, 0.21, 0.21, 0.07, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+  };
+  sign(9, 3.45, -16.3, 'E1'); sign(55, 3.6, -76.5, 'E1', -1);
+  sign(73, 3.45, 63.5, 'E2'); sign(44, 3.45, 12.5, 'E2', -1);
+  sign(-3, 3.65, -33.45, 'A', -1); sign(69, 3.65, 51.65, 'B', -1);
+
+  L.teamSpawns = [[55, 51, 47, 43].flatMap(x => [-86, -82.5].map(z => new THREE.Vector3(x, 0.08, z))), [43, 47, 51, 55].flatMap(x => [79, 83].map(z => new THREE.Vector3(x, 0.08, z)))];
+  L.teamFacing = [Math.PI, 0]; L.playerStart.copy(L.teamSpawns[1][0]);
+  L.bombSites = [{ id: 'A', pos: new THREE.Vector3(-3, 0.08, -46), radius: 3 }, { id: 'B', pos: new THREE.Vector3(69, 0.08, 37), radius: 3 }];
+  for (const { pos: { x, z }, id } of L.bombSites) {
+    for (const dx of [-3.2, 3.2]) box(x + dx, 0.075, z, 0.12, 0.022, 6.5, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+    for (const dz of [-3.2, 3.2]) box(x, 0.075, z + dz, 6.3, 0.022, 0.12, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+    if (id === 'A') {
+      for (const s of [-1, 1]) { const g = new THREE.BoxGeometry(0.18, 0.024, 2.2); g.rotateY(s * 0.4); g.translate(x + s * 0.42, 0.103, z); addGeo(g, INK.ORANGE, 'cloth'); }
+      box(x, 0.091, z + 0.2, 1.1, 0.024, 0.16, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+    } else {
+      for (const dx of [-0.7, 0.7]) box(x + dx, 0.091, z, 0.16, 0.024, 2.1, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+      for (const dz of [-1, 0, 1]) box(x, 0.091, z + dz, 1.3, 0.024, 0.16, { surface: 'cloth', ink: INK.ORANGE, ...detail });
+    }
+  }
+  const groundSpots = [[-89, 0, -78], [-86, 0, -45], [-66, 0, -68], [-25, 0, -68], [55, 0, -68], [-66, 0, -25], [9, 0, -25], [55, 0, -25], [-35, 0, -2], [7, 0, 7], [49, 0, 5], [88, 0, -44], [45, 0, 38], [73, 0, 18.5], [44, 0, 57.5], [74, 0, 57.5], [3, 0, 40], [-32, 0, 55], [-34, 0, 80], [83, 0, 81]];
+  for (const [x, y, z] of groundSpots) spawn(x, y + 0.08, z);
+  for (const [x, y, z] of [[-49, 4.2, -57.7], [-48, 4.2, -36.3], [25, 4.2, 34], [87, 4.2, 31]]) sniper(x, y + 0.08, z);
+  for (const [x, y, z] of [[-57, 0, -47], [5, 0, -48], [45, 0, -44], [-34, 0, 3], [7, 0, 37], [50, 0, 34], [76, 0, 55], [25.5, 4.2, 57], [-49, 4.2, -57.7], [87, 4.2, 46]]) pickup(x, y + 0.15, z);
+  L.arenaSpawns = [...L.teamSpawns.flat(), ...L.spawns, ...L.snipers].map(p => p.clone());
+  return B.finish();
+}
+
 export function buildLevel(scene, world, key = 'district', opts = {}) {
   const B = createBuilder(scene, world);
-  return key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, !!opts.arena) : key === 'undercity' ? buildUndercity(B, !!opts.arena) : buildDistrict(B, !!opts.arena);
+  return key === 'zijingang' ? buildZijingang(B) : key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, !!opts.arena) : key === 'undercity' ? buildUndercity(B, !!opts.arena) : buildDistrict(B, !!opts.arena);
 }
