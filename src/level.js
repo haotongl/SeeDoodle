@@ -10,7 +10,7 @@ import { buildHumanoid } from './enemies.js';
 
 // Doodle Mexico is built and kept, but off the menu until it is ready; flip this to offer it again
 export const MEXICO_READY = false;
-export const LEVELS = [{ key: 'district', name: 'DOODLE DISTRICT', blurb: 'streets, rooftops and fire escapes' }, { key: 'undercity', name: 'THE UNDERCITY', blurb: 'flooded tunnels, shuttered shops and metro echoes', pvpOnly: true }, ...(MEXICO_READY ? [{ key: 'mexico', name: 'DOODLE MEXICO', blurb: 'a sun-baked plaza · piñatas, tacos and mariachi' }] : [])];
+export const LEVELS = [{ key: 'district', name: 'DOODLE DISTRICT', blurb: 'streets, rooftops and fire escapes' }, { key: 'undercity', name: 'THE UNDERCITY', blurb: 'flooded tunnels, shuttered shops and metro echoes', pvpOnly: true }, { key: 'depot', name: 'SUNLINE DEPOT', blurb: 'opposite bases, twin courtyards and covered routes', pvpOnly: true, teamOnly: true }, ...(MEXICO_READY ? [{ key: 'mexico', name: 'DOODLE MEXICO', blurb: 'a sun-baked plaza · piñatas, tacos and mariachi' }] : [])];
 
 function createBuilder(scene, world) {
   const geos = {}; const L = { rings: [], spawns: [], snipers: [], pickups: [], animated: [], meshes: [], playerStart: new THREE.Vector3(0, 0, 42), bounds: { minX: -55, maxX: 55, minZ: -55, maxZ: 55 }, arenaSpawns: [], grappleMovers: [], breakables: [], key: 'district' };
@@ -22,10 +22,16 @@ function createBuilder(scene, world) {
   const collider = (x, y, z, w, h, d, o = {}) => world.addBox({ x: x - w / 2, y, z: z - d / 2 }, { x: x + w / 2, y: y + h, z: z + d / 2 }, { noNav: !!o.noNav, noShoot: !!o.noShoot, noGrapple: !!o.noGrapple, tag: o.tag });
   function box(x, y, z, w, h, d, o = {}) {
     const surface = o.surface || (o.ink === INK.BLACK || (Math.min(w, d) < 0.3 && h > 1) ? 'metal' : h <= 1 && w > 3 && d > 3 ? 'ground' : 'plaster');
-    const g = new THREE.BoxGeometry(w, h, d); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE, surface, !!o.classicOnly);
+    const pad = o.visualPad || 0;
+    const g = new THREE.BoxGeometry(w + pad * 2, h + pad * 2, d + pad * 2); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE, surface, !!o.classicOnly);
     if (!o.noCollide) collider(x, y, z, w, h, d, o);
   }
-  const slab = (x1, z1, x2, z2, y, t, o = {}) => box((x1 + x2) / 2, y - t, (z1 + z2) / 2, x2 - x1, t, z2 - z1, { surface: 'stone', ...o }); // top surface at y
+  const slab = (x1, z1, x2, z2, y, t, o = {}) => {
+    const x = (x1 + x2) / 2, z = (z1 + z2) / 2, w = x2 - x1, d = z2 - z1;
+    // Floors cap adjoining walls. A tiny visual overhang prevents coincident top/bottom and
+    // edge faces from alternating materials, while the walkable height remains exactly y.
+    box(x, y - t, z, w, t, d, { surface: 'stone', visualPad: 0.004, ...o });
+  };
   // Wall pieces along an axis with rectangular gaps [a1, a2, yBottom = 0, yTop = h]; gaps may overlap.
   function wallPieces(a1, a2, h, gaps) {
     const xs = new Set([a1, a2]);
@@ -212,7 +218,7 @@ function buildDistrict(B, arena = false) {
     }
     // ruler bridge from the A roof: to the tower's third floor in solo, right across to building B in a match (y=12)
     { const bx2 = arena ? 24.2 : -7; const len = bx2 + 25.2;
-      box((bx2 - 25.2) / 2, 11.6, 6, len, 0.4, 2.4, { ink: INK.ORANGE });
+      box((bx2 - 25.2) / 2, 11.6, 6, len, 0.4, 2.4, { ink: INK.ORANGE, visualPad: 0.008 });
       for (let i = 0; i <= Math.floor(len); i++) box(-25 + i, 12, 5, 0.06, 0.02, i % 5 === 0 ? 0.6 : 0.35, { noCollide: true, ink: INK.BLACK });
       rail(-25, 7.2, bx2, 7.2, 12, { ink: INK.ORANGE }); if (arena) rail(-25, 4.8, bx2, 4.8, 12, { ink: INK.ORANGE }); }
     
@@ -246,7 +252,8 @@ function buildDistrict(B, arena = false) {
     }
     rail(x1, z1, 31, z1, 12); rail(37, z1, x2, z1, 12); rail(x1, z2, 33.4, z2, 12); rail(36.4, z2, x2, z2, 12); rail(x2, z1, x2, z2, 12); rail(x1, z1, x1, 9, 12); rail(x1, 15, x1, z2, 12);
     // plank bridge tower floor 3 -> B roof
-    box(15.5, 11.6, 6, 17.4, 0.4, 2.2); rail(7, 4.9, 24, 4.9, 12);
+    // The arena's ruler already spans both buildings; a second plank had coplanar top/bottom faces.
+    if (!arena) { box(15.5, 11.6, 6, 17.4, 0.4, 2.2); rail(7, 4.9, 24, 4.9, 12); }
     
     spawn(34, 12, 18); spawn(40, 0, 8); sniper(26, 12, 18); pickup(34, 0, 12); pickup(34, 6, 19); pickup(42, 12, 6);
   }
@@ -577,7 +584,87 @@ function buildMexico(B, arena = false) {
   B.finish(); return L;
 }
 
+// A ground-level, symmetric depot keeps objectives reachable by foot and gives each team a
+// sheltered assembly area. Routes bend outside both bases before joining either courtyard.
+function buildDepot(B) {
+  const { L, box, wallX, wallZ, cyl, sphere, collider, addGeo } = B;
+  L.key = 'depot'; L.bounds = { minX: -42, maxX: 42, minZ: -32, maxZ: 32 };
+  box(0, -0.8, 0, 86, 0.8, 66, { surface: 'ground', ink: INK.BROWN });
+  wallX(-42, 42, -32, 0, 8.4, 0.7, [], { surface: 'plaster', ink: INK.BROWN });
+  wallX(-42, 42, 32, 0, 8.4, 0.7, [], { surface: 'plaster', ink: INK.BROWN });
+  wallZ(-31.65, 31.65, -42, 0, 8.4, 0.7, [], { surface: 'plaster', ink: INK.BROWN });
+  wallZ(-31.65, 31.65, 42, 0, 8.4, 0.7, [], { surface: 'plaster', ink: INK.BROWN });
+  collider(0, 14, 0, 90, 4, 70, { noNav: true, noGrapple: true });
+  for (const z of [-31.57, 31.57]) {
+    box(0, 6.7, z, 82.8, 0.24, 0.12, { noCollide: true, surface: 'metal', ink: INK.BLACK });
+    for (const x of [-32, -16, 0, 16, 32]) {
+      box(x, 4.5, z, 7.8, 1.4, 0.12, { noCollide: true, surface: 'glass', ink: INK.TEAL });
+      box(x, 4.4, z + (z < 0 ? 0.09 : -0.09), 0.1, 1.6, 0.15, { noCollide: true, surface: 'metal', ink: INK.BLACK });
+    }
+  }
+
+  const cargo = (x, z, w, d, h, ink) => {
+    box(x, 0, z, w, h, d, { surface: 'metal', ink, noNav: true });
+    // Ribs stand clear of the body face so the stylized surface pass never alternates materials.
+    for (const dx of [-w / 2 + 0.24, w / 2 - 0.24]) for (const dz of [-d / 2 - 0.045, d / 2 + 0.045])
+      box(x + dx, 0.12, z + dz, 0.12, h - 0.24, 0.06, { noCollide: true, surface: 'metal', ink: INK.BLACK });
+    for (const dz of [-d / 2 - 0.04, d / 2 + 0.04]) box(x, h - 0.25, z + dz, w - 0.3, 0.1, 0.05, { noCollide: true, surface: 'metal', ink: INK.BLACK });
+  };
+  L.teamSpawns = [];
+  for (const [team, sign, ink] of [[0, -1, INK.BLUE], [1, 1, INK.ORANGE]]) {
+    L.teamSpawns[team] = [-36, -33].flatMap(x => [-6, -2, 2, 6].map(z => new THREE.Vector3(x * -sign, 0.05, z)));
+    wallZ(-13, 13, sign * 26, 0, 6.4, 0.7, [[-10, -6, 0, 3.3], [6, 10, 0, 3.3]], { surface: 'plaster', ink });
+    // Short returns shield both exits without turning a spawn area into a one-door trap.
+    for (const z of [-13, 13]) box(sign * 31.5, 0, z, 11.7, 5.8, 0.55, { surface: 'plaster', ink });
+    box(sign * 34, 6.4, 0, 14.8, 0.32, 26.6, { surface: 'metal', ink, noNav: true });
+    box(sign * 25.57, 4.3, 0, 0.12, 0.7, 8.5, { noCollide: true, surface: 'cloth', ink });
+    for (const z of [-8, 8]) {
+      box(sign * 25.53, 3.42, z, 0.17, 0.18, 4.5, { noCollide: true, surface: 'metal', ink: INK.BLACK });
+      box(sign * 30, 0.012, z, 7, 0.022, 0.12, { noCollide: true, surface: 'cloth', ink });
+    }
+    for (const z of [-19, 19]) cargo(sign * 19, z, 4, 6, 3.4, ink);
+    for (const z of [-5, 5]) cargo(sign * 15, z, 3.5, 4, 2.3, INK.OLIVE);
+  }
+  // The central hall is solid cover; the north/south lanes remain at least six metres wide.
+  cargo(0, 0, 14, 12, 5.4, INK.TEAL);
+  box(0, 5.48, 0, 14.5, 0.18, 12.5, { surface: 'metal', ink: INK.BLACK, noNav: true });
+  for (const z of [-6.13, 6.13]) box(0, 3.3, z, 8, 0.75, 0.12, { noCollide: true, surface: 'cloth', ink: INK.ORANGE });
+  for (const z of [-26, 26]) {
+    cargo(-7.5, z, 3.5, 2.5, 1.25, INK.BROWN);
+    cargo(7.5, z, 3.5, 2.5, 1.25, INK.BROWN);
+    // Low planting beds make the outer courtyards distinct without hiding a standing player.
+    for (const x of [-28, 28]) {
+      box(x, 0, z, 3.8, 0.55, 2, { surface: 'stone', ink: INK.BROWN });
+      for (const dx of [-1, 0, 1]) sphere(x + dx, 0.85, z, 0.58, { surface: 'foliage', ink: INK.GREEN });
+    }
+  }
+  L.bombSites = [{ id: 'A', pos: new THREE.Vector3(0, 0.05, -20), radius: 3 }, { id: 'B', pos: new THREE.Vector3(0, 0.05, 20), radius: 3 }];
+  for (const site of L.bombSites) {
+    const { x, z } = site.pos;
+    for (const dx of [-3.1, 3.1]) box(x + dx, 0.013, z, 0.1, 0.022, 6.3, { noCollide: true, surface: 'cloth', ink: INK.ORANGE });
+    for (const dz of [-3.1, 3.1]) box(x, 0.013, z + dz, 6.1, 0.022, 0.1, { noCollide: true, surface: 'cloth', ink: INK.ORANGE });
+    // Ground letters use plain geometry so the map is legible offline in either visual style.
+    if (site.id === 'A') {
+      for (const sign of [-1, 1]) {
+        const g = new THREE.BoxGeometry(0.18, 0.025, Math.hypot(0.85, 2));
+        g.rotateY(Math.atan2(sign * 0.85, 2)); g.translate(sign * 0.425, 0.03, z);
+        addGeo(g, INK.ORANGE, 'cloth');
+      }
+      box(0, 0.016, z + 0.2, 0.9, 0.025, 0.18, { noCollide: true, surface: 'cloth', ink: INK.ORANGE });
+    } else {
+      for (const dx of [-0.75, 0.75]) box(dx, 0.016, z, 0.18, 0.025, 2, { noCollide: true, surface: 'cloth', ink: INK.ORANGE });
+      for (const dz of [-0.9, 0, 0.9]) box(0, 0.016, z + dz, 1.32, 0.025, 0.18, { noCollide: true, surface: 'cloth', ink: INK.ORANGE });
+    }
+    cyl(0, 0, z < 0 ? -30.4 : 30.4, 0.35, 5.8, { surface: 'metal', ink: INK.BLACK });
+    box(0, 5.4, z < 0 ? -29.8 : 29.8, 1.6, 0.22, 1.6, { noCollide: true, surface: 'metal', ink: INK.ORANGE });
+  }
+  L.teamFacing = [-Math.PI / 2, Math.PI / 2];
+  L.playerStart.copy(L.teamSpawns[0][0]);
+  L.arenaSpawns = L.teamSpawns.flat().map(p => p.clone());
+  return B.finish();
+}
+
 export function buildLevel(scene, world, key = 'district', opts = {}) {
   const B = createBuilder(scene, world);
-  return key === 'mexico' ? buildMexico(B, !!opts.arena) : key === 'undercity' ? buildUndercity(B, !!opts.arena) : buildDistrict(B, !!opts.arena);
+  return key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, !!opts.arena) : key === 'undercity' ? buildUndercity(B, !!opts.arena) : buildDistrict(B, !!opts.arena);
 }

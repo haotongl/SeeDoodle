@@ -239,6 +239,7 @@ function makeRoom(code, host, { isPublic, name, map, max }) {
     code, codes: new Set([code]), hostId: host.id, isPublic: !!isPublic,
     members: new Map(), max: Math.min(Math.max(2, max || MAX_PLAYERS), 16),
     inMatch: false, accepting: true, hostName: name || '', map: map || null,
+    mode: null, combat: null, actors: new Map(), bots: new Map(), unshielded: new Map(),
   };
   rooms.set(code, room);
   return room;
@@ -258,6 +259,7 @@ function roomInfo(room) {
   return {
     code: room.code, players: room.members.size, max: room.max, inMatch: room.inMatch,
     hostName: room.hostName, isPublic: room.isPublic, map: room.map, full: room.members.size >= room.max,
+    mode: room.mode, bots: room.bots.size,
   };
 }
 const roster = (room) => [...room.members.values()].map((m) => ({ id: m.id, name: m.name }));
@@ -268,6 +270,9 @@ function leaveRoom(client, reason) {
   client.room = null;
   client.grenades.clear();
   room.members.delete(client.id);
+  room.actors.delete(client.id);
+  room.unshielded.delete(client.id);
+  if (room.combat) room.combat.actors = room.combat.actors.filter((a) => a.id !== client.id);
   if (room.members.size === 0) { dropRoom(room); return; }
   if (room.hostId === client.id) {
     // promote the longest-standing member rather than dropping everyone's match
@@ -288,7 +293,7 @@ function joinRoom(client, room, meta) {
   toRoom(room, { t: 'peer', id: client.id, meta: { name: client.name, ...(meta || {}) } }, client.id);
   return {
     t: 'joined', code: room.code, id: client.id, hostId: room.hostId, isPublic: room.isPublic,
-    map: room.map, inMatch: room.inMatch, max: room.max, members: roster(room),
+    map: room.map, inMatch: room.inMatch, max: room.max, members: roster(room), combat: room.combat,
   };
 }
 
@@ -384,6 +389,52 @@ const ARMS = {
 const shots = { ok: 0, rejected: 0, why: {} };
 const deny = (r) => { shots.rejected++; shots.why[r] = (shots.why[r] || 0) + 1; return false; };
 
+// The host still owns simulation and objectives. This small roster lets the hit judge enforce
+// team and round boundaries without pretending to run a second copy of the level or the AI.
+const teamMode = (room) => room.mode === 'tdm' || room.mode === 'demolition';
+const combatPhases = new Set(['warmup', 'live', 'roundover', 'over']);
+function clearCombat(room) {
+  room.combat = null; room.actors.clear(); room.bots.clear(); room.unshielded.clear();
+  for (const member of room.members.values()) { member.grenades.clear(); member.hist.length = 0; member.buckets = {}; }
+}
+function noteCombat(room, d) {
+  if (!d || !['tdm', 'demolition'].includes(d.mode) || !Number.isSafeInteger(d.round) || d.round < 0 || !combatPhases.has(d.phase) || !Array.isArray(d.actors) || d.actors.length > 32) return deny('malformed combat state');
+  if (room.combat && d.mode === room.mode && d.round < room.combat.round) return deny('stale combat state');
+  const actors = new Map(), bots = new Map();
+  for (const row of d.actors) {
+    if (!row || typeof row.id !== 'string' || row.id.length > 96 || !row.id.length || actors.has(row.id) || (row.team !== 0 && row.team !== 1)) return deny('malformed combat actor');
+    const bot = row.bot === true;
+    if (bot && (room.members.has(row.id) || bots.size >= 16)) return deny('invalid bot actor');
+    if (!bot && !room.members.has(row.id)) continue;
+    // A queued host snapshot cannot restore protection already surrendered by firing. Keep this
+    // separate from ordinary expiry: warmup -> live legitimately grants the opening protection.
+    const forfeited = d.mode === room.mode && room.combat?.round === d.round && room.unshielded.has(row.id) && room.unshielded.get(row.id) === row.life;
+    actors.set(row.id, { ...row, bot, alive: row.alive === true, protectedUntil: !forfeited && Number.isFinite(row.protectedUntil) ? Math.max(0, row.protectedUntil) : 0 });
+    if (bot) bots.set(row.id, room.bots.get(row.id) || { id: row.id, room, bot: true, hist: [], rtt: [], buckets: {}, grenades: new Map() });
+  }
+  const fresh = !room.combat || d.mode !== room.mode || d.round !== room.combat.round;
+  if (fresh) room.unshielded.clear();
+  else for (const [id, life] of room.unshielded) if (!actors.has(id) || actors.get(id).life !== life) room.unshielded.delete(id);
+  if (fresh) for (const actor of [...room.members.values(), ...bots.values()]) { actor.hist.length = 0; actor.grenades.clear(); actor.buckets = {}; }
+  room.mode = d.mode; room.actors = actors; room.bots = bots;
+  room.combat = { ...d, actors: [...actors.values()] };
+  return room.combat;
+}
+function sendCombat(room, client) {
+  if (room.combat) send(client, { t: 'm', tt: 'combatstate', d: room.combat, from: room.hostId });
+}
+function combatGate(room, attacker, victim, round, allowDead = false) {
+  if (!teamMode(room)) return true;
+  const c = room.combat;
+  if (!c || c.phase !== 'live' || round !== c.round) return deny('combat round is not live');
+  const a = room.actors.get(attacker.id), b = victim && room.actors.get(victim.id);
+  if (!a || (!a.alive && !allowDead)) return deny('combat attacker is down');
+  if (victim && (!b || !b.alive)) return deny('combat target is down');
+  if (b && a.team === b.team) return deny('friendly fire');
+  if (b && b.protectedUntil > Date.now()) return deny('spawn protection');
+  return true;
+}
+
 // Round trip, measured from this end. The client is never asked what its ping is: a bigger number
 // buys a deeper rewind, so that is the one thing it must not be allowed to say.
 function noteRtt(client, ms) {
@@ -393,16 +444,20 @@ function noteRtt(client, ms) {
 }
 // The floor of the recent samples. Jitter only ever delays a packet, never hurries it, so the
 // smallest round trip seen lately is the honest one and an average would just track the worst luck.
-function rttOf(client) { return client.rtt.length ? Math.min(...client.rtt) : 0; }
+function rttOf(client) {
+  if (client.bot) { const host = client.room.members.get(client.room.hostId); return host ? rttOf(host) : 0; }
+  return client.rtt.length ? Math.min(...client.rtt) : 0;
+}
 
 function noteMove(client, d, now) {
-  if (!Array.isArray(d) || d.length < 8) return;
+  if (!Array.isArray(d) || d.length < 8) return false;
   const [x, y, z] = d;
-  if (![x, y, z].every(Number.isFinite)) return;
+  if (![x, y, z].every(Number.isFinite)) return false;
   const h = client.hist;
   h.push({ t: now, x, y, z, alive: !!(d[6] & 64) });
   while (h.length > 2 && now - h[0].t > HIST_MS) h.shift();
   for (const g of client.grenades.values()) if (g.phase === 'armed' && now <= g.expiresAt + 200) g.held = [x, y + 0.9, z];
+  return true;
 }
 // Where this player was on the server's clock at time t, interpolated between the two samples
 // either side of it - the feed is only 20Hz, so landing between packets is the normal case.
@@ -491,7 +546,7 @@ function noteGrenade(client, d, now) {
     const launched = d.thrownAt ?? now - Math.min(MAX_REWIND_MS, rttOf(client) / 2);
     g.thrownAt = Math.min(now, g.expiresAt, launched);
   }
-  return { id: d.id, phase: d.phase, pos, vel, expiresAt: g.expiresAt, charged: true };
+  return { id: d.id, phase: d.phase, pos, vel, expiresAt: g.expiresAt, charged: true, ...(d.phase === 'thrown' ? { thrownAt: g.thrownAt } : {}) };
 }
 function grenadeCanReach(g, at) {
   if (g.phase === 'armed') return len3(sub(at, g.held)) <= ORIGIN_SLACK;
@@ -515,8 +570,10 @@ function withinFireRate(client, kind, now) {
 function resolveHit(client, m) {
   const room = client.room;
   if (!room) return deny('no room');
-  const victim = room.members.get(m.to);
+  const victim = room.members.get(m.to) || room.bots.get(m.to);
   if (!victim || victim === client) return deny('no such target');
+  const lingeringGrenade = m.k === 'grenade' && client.grenades.get(m.gid)?.phase === 'thrown';
+  if (!combatGate(room, client, victim, m.round, lingeringGrenade)) return false;
   const arm = ARMS[m.k];
   if (!arm) return deny('unknown weapon');
   const dmg = Number(m.dmg);
@@ -598,10 +655,13 @@ function resolveHit(client, m) {
 
   shots.ok++;
   const from = grenade ? vec3(m.at) : selfNow ? [+selfNow.x.toFixed(1), +(selfNow.y + 0.9).toFixed(1), +selfNow.z.toFixed(1)] : null;
-  send(victim, { t: 'm', tt: 'pdmg', from: client.id, d: { amount: Math.round(dmg), from, by: client.id, crit: !!m.crit, src: m.k } });
+  const d = { amount: Math.round(dmg), from, by: client.id, crit: !!m.crit, src: m.k, ...(teamMode(room) ? { round: room.combat.round } : {}) };
+  if (victim.bot) send(room.members.get(room.hostId), { t: 'm', tt: 'bdmg', from: client.id, d: { ...d, id: victim.id } });
+  else send(victim, { t: 'm', tt: 'pdmg', from: client.id, d });
   return true;
 }
 
+const HOST_MESSAGES = new Set(['lobby', 'start', 'combatstate', 'end', 'score', 'backtolobby', 'clock', 'botps', 'bothit', 'botnade', 'botdead', 'botshots']);
 function onMessage(client, raw) {
   let m;
   try { m = JSON.parse(raw); } catch (e) { return; }
@@ -708,7 +768,7 @@ function onMessage(client, raw) {
         // thrown away, and the client has to keep holding the key to the seat it actually has
         t: 'resumed', token: seat.token, code: seat.room.code, id: seat.id, hostId: seat.room.hostId,
         isPublic: seat.room.isPublic, map: seat.room.map, inMatch: seat.room.inMatch,
-        max: seat.room.max, members: roster(seat.room),
+        max: seat.room.max, members: roster(seat.room), combat: seat.room.combat,
       });
       toRoom(seat.room, { t: 'back', id: seat.id }, seat.id);
       break;
@@ -723,28 +783,71 @@ function onMessage(client, raw) {
     // game payload: the server does the routing the host used to do by hand
     case 'm': {
       if (!room) break;
+      if (HOST_MESSAGES.has(m.tt) && client.id !== room.hostId) { deny('host message sent by guest'); break; }
+      if (m.tt === 'bdmg') { deny('bdmg sent direct'); break; }
+      if (m.tt === 'combatreq') { sendCombat(room, client); break; }
+      if (m.tt === 'unshield') {
+        const d = m.d, id = d?.id ?? client.id, a = room.actors.get(id);
+        if (!teamMode(room) || room.combat?.phase !== 'live' || !a?.alive || d?.round !== room.combat.round || !Number.isSafeInteger(d?.life) || d.life !== a.life || (id !== client.id && !(client.id === room.hostId && a.bot))) { deny('invalid protection forfeiture'); break; }
+        a.protectedUntil = 0; room.unshielded.set(id, a.life);
+        send(room.members.get(room.hostId), { t: 'm', tt: 'unshield', from: client.id, d: { id, round: room.combat.round, life: a.life } });
+        break;
+      }
+      if (m.tt === 'lobby' || m.tt === 'start') {
+        const mode = m.d && m.d.mode;
+        if (typeof mode === 'string' && mode !== room.mode) { clearCombat(room); room.mode = mode; }
+      }
+      // Targeted late-join starts are snapshots of the current match, not a new match.
+      if (m.tt === 'start' && !m.to && !(m.d && m.d.late)) clearCombat(room);
+      if (m.tt === 'combatstate') {
+        const state = noteCombat(room, m.d); if (!state) break;
+        m.d = state;
+      }
+      if (m.tt === 'end' && room.combat) room.combat.phase = 'over';
+      if (m.tt === 'backtolobby') clearCombat(room);
+      if (m.tt === 'bothit') {
+        const bot = m.d && room.bots.get(m.d.id);
+        if (!bot) { deny('unknown bot'); break; }
+        resolveHit(bot, m.d); break;
+      }
+      if (m.tt === 'botps') {
+        const bot = m.d && room.bots.get(m.d.id);
+        if (!bot || !noteMove(bot, m.d.ps, Date.now())) { deny('invalid bot position'); break; }
+      }
+      if (m.tt === 'botnade') {
+        const bot = m.d && room.bots.get(m.d.id), packet = m.d && m.d.nade;
+        if (!bot || !packet || !combatGate(room, bot, null, m.d.round, bot.grenades.has(packet.id))) break;
+        const grenade = noteGrenade(bot, packet, Date.now()); if (!grenade) break;
+        toRoom(room, { t: 'm', tt: 'nade', from: bot.id, d: { ...grenade, round: room.combat.round } }, client.id);
+        break;
+      }
+      if (m.tt === 'nade' && teamMode(room) && !(m.d && m.d.charged === true)) { deny('unregistered team grenade'); break; }
       if (m.tt === 'nade' && m.d && m.d.charged === true) {
+        if (!combatGate(room, client, null, m.d.round, client.grenades.has(m.d.id))) break;
         const grenade = noteGrenade(client, m.d, Date.now());
         if (!grenade) break;
-        m.d = grenade;
-      }
-      // Targeted late-join starts are snapshots of the current round, not a new round.
-      if (m.tt === 'start' && client.id === room.hostId && !m.to && !(m.d && m.d.late)) {
-        for (const member of room.members.values()) member.grenades.clear();
+        m.d = { ...grenade, ...(teamMode(room) ? { round: room.combat.round } : {}) };
       }
       // Damage is no longer something one player may simply announce to another. It arrives as a
       // claim and leaves as `pdmg` only if it survives resolveHit. The exception is the host, which
       // simulates the enemies in co-op and so is the only one that can say a bot hurt you - it is
       // already trusted with every enemy in the game.
-      if (m.tt === 'pdmg' && client.id !== room.hostId) { deny('pdmg sent direct'); break; }
+      if (m.tt === 'pdmg' && (client.id !== room.hostId || teamMode(room))) { deny('pdmg sent direct'); break; }
       // The position feed is relayed as it always was, but read on the way past: this is what the
       // rewind is built from, stamped with the time it got here.
       if (m.tt === 'ps') noteMove(client, m.d, Date.now());
       // Position and enemy snapshots describe the present and are worthless late; everything else
       // is an event that has to arrive. See WSConn.send for what that buys on a stalled link.
-      const drop = m.tt === 'ps' || m.tt === 'esnap';
+      const drop = m.tt === 'ps' || m.tt === 'esnap' || m.tt === 'botps';
       const out = JSON.stringify({ t: 'm', tt: m.tt, d: m.d, from: client.id });
-      if (m.to) { const target = room.members.get(m.to); if (target && target.ws && !target.ws.closed) target.ws.send(out, drop); break; }
+      if (m.to) {
+        const target = room.members.get(m.to);
+        if (target && target.ws && !target.ws.closed) {
+          target.ws.send(out, drop);
+          if (m.tt === 'start' && m.d && m.d.late) sendCombat(room, target);
+        }
+        break;
+      }
       if (m.relay || client.id === room.hostId) { for (const p of room.members.values()) if (p.id !== client.id && p.ws && !p.ws.closed) p.ws.send(out, drop); break; }
       const host = room.members.get(room.hostId);
       if (host && host.ws && !host.ws.closed) host.ws.send(out, drop);

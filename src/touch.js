@@ -25,6 +25,7 @@ const BTNS = [
   ['grenade', 'NADE', 'b-nade'], ['grapple', 'HOOK', 'b-hook'], ['melee', 'SLASH', 'b-melee'], ['crouch', 'SLIDE', 'b-slide'],
   ['reload', 'RELOAD', 'b-reload'], ['jump', 'JUMP', 'b-jump'], ['aim', 'AIM', 'b-aim'],
   ['nadeCancel', 'CANCEL', 'b-nade-cancel gone'],
+  ['interact', 'INTERACT', 'b-interact gone'], ['bombDrop', 'DROP C4', 'b-bomb-drop gone'],
   ['fire', 'FIRE', 'b-fire'],
 ];
 
@@ -205,6 +206,13 @@ export class TouchControls {
     if (state === 'idle') { for (const p of this.ptrs.values()) p.overCancel = false; this._syncCancelHover(); }
   }
 
+  setObjective(available, kind, carrying) {
+    for (const el of this.btnEls.interact || []) { el.classList.toggle('gone', !available); el.textContent = ts(kind === 'plant' ? 'PLANT C4' : 'DEFUSE C4'); }
+    for (const el of this.btnEls.bombDrop || []) el.classList.toggle('gone', !carrying);
+    if (!available) { delete this.frames.interact; this.input.markTouchHold('interact', false); }
+    if (!carrying) { delete this.frames.bombDrop; this.input.markTouchHold('bombDrop', false); }
+  }
+
   // called once per frame, before Input.update folds everything together
   update() {
     const k = {};
@@ -255,5 +263,5 @@ export const TOUCH_KEYS = {
   fire: 'FIRE', aim: 'AIM', block: 'AIM', jump: 'JUMP', sprint: 'push the stick forward', slide: 'SLIDE', dash: 'SLIDE',
   grapple: 'HOOK', melee: 'SLASH', reload: 'RELOAD', grenade: 'NADE', focus: 'AIM + FIRE', next: 'the weapon numbers',
   pause: '❚❚', confirm: 'tap the screen', score: 'TAB',
-  nadePin: 'PULL PIN', nadeCancel: 'CANCEL',
+  nadePin: 'PULL PIN', nadeCancel: 'CANCEL', interact: 'INTERACT', bombDrop: 'DROP C4',
 };

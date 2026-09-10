@@ -329,6 +329,29 @@ body.touch, body.touch #c { overscroll-behavior: none; touch-action: none; -webk
 .b-melee { right: calc(198px + var(--sar)); bottom: calc(56px + var(--sab)); width: 56px; height: 56px; font-size: 11px; }
 .b-nade { right: calc(190px + var(--sar)); bottom: calc(146px + var(--sab)); width: 54px; height: 54px; font-size: 12px; }
 .b-nade-cancel { right: calc(198px + var(--sar)); bottom: calc(56px + var(--sab)); width: 56px; height: 56px; font-size: 11px; }
+.b-interact { left: 43%; bottom: calc(90px + var(--sab)); width: 62px; height: 54px; font-size: 11px; background: rgba(29, 44, 52, .3); }
+.b-bomb-drop { left: calc(43% - 72px); bottom: calc(152px + var(--sab)); width: 62px; height: 32px; font-size: 10px; }
+#hud.team-game .hud-tl, #hud.team-game .hud-tr .wave, #hud.team-game .hud-tr .left { display: none; }
+#hud.nogame .objective-hud { display: none; }
+.team-lobby { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 15px 0; }
+.team-lobby section { padding: 12px; border-radius: 8px; background: rgba(100, 135, 155, .1); min-width: 0; }
+.team-lobby section.team-1 { background: rgba(220, 162, 64, .1); }
+.team-lobby h3 { margin: 0 0 8px; font-size: 16px; }
+.team-lobby small { opacity: .65; font-size: 11px; }
+.team-seat { display: flex; align-items: center; gap: 6px; min-height: 34px; font-size: 14px; }
+.team-seat .player-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.team-seat button { padding: 2px 5px !important; min-width: 22px; }
+.objective-hud { position: absolute; top: max(16px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: min(430px, 58vw); text-align: center; pointer-events: none; color: #e7edf0; text-shadow: 0 1px 3px rgba(0,0,0,.65); background: rgba(23,34,42,.22); border-radius: 6px; padding: 6px 12px; z-index: 3; }
+.objective-hud[hidden] { display: none; }
+.team-totals { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; }
+.team-totals b { font-size: 22px; padding: 0 6px; }
+.team-totals small { font-size: 11px; opacity: .8; }
+.team-totals .blue, .team-0 h3, h4.team-0 { color: #7ebce7; }
+.team-totals .orange, .team-1 h3, h4.team-1 { color: #f4bd72; }
+.objective-hint { font-size: 11px; line-height: 1.5; opacity: .85; }
+.objective-progress { height: 3px; background: rgba(255,255,255,.16); margin-top: 5px; overflow: hidden; }
+.objective-progress i { display: block; height: 100%; background: rgba(255,227,150,.8); }
+@media (max-width: 600px) { .team-lobby { gap: 6px; } .team-lobby section { padding: 7px; } .team-lobby h3 { font-size: 14px; } .objective-hud { padding: 4px 6px; } .team-totals { font-size: 10px; gap: 3px; } .team-totals b { font-size: 18px; padding: 0 2px; } }
 .tb.b-nade-cancel.live { color: var(--red); border-color: var(--red); }
 .tb.b-nade-cancel.drop-target { border-style: solid; opacity: 1; outline: 2px solid currentColor; outline-offset: 3px; }
 /* weapons along the bottom edge, where either thumb can reach them. These double as the weapon

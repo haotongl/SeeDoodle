@@ -227,6 +227,10 @@ export class Player {
     this._recoilRecover(dt);
     this.forward.set(-Math.sin(this.yaw) * Math.cos(this.pitch), Math.sin(this.pitch), -Math.cos(this.yaw) * Math.cos(this.pitch));
     _fwd.set(-Math.sin(this.yaw), 0, -Math.cos(this.yaw)); _right.set(Math.cos(this.yaw), 0, -Math.sin(this.yaw)); this.right.copy(_right);
+    if (ctx.combatInputAllowed && !ctx.combatInputAllowed()) {
+      this.cancelGrenade(); this.cancelKnife(); this._resetGrenadeInput(); this.firing = false;
+      b.vel.set(0, 0, 0); this._updateCamera(dt); this.weapon.animate(dt, this._weaponState(false, false, 0)); return;
+    }
     if (this.dashLock) {
       // the focus dash is sprinting the body across the level itself; don't fight it with gravity
       b.vel.set(0, 0, 0); b.onGround = false; this.coyote = 0.13;
@@ -368,7 +372,7 @@ export class Player {
   _grenadeHand(pos) { return pos.copy(this.eye).addScaledVector(this.right, 0.25).addScaledVector(this.forward, 0.6).add(_v.set(0, -0.15, 0)); }
   _grenadeControlsAllowed() {
     const inp = this.ctx.input, game = this.ctx.game;
-    return this.alive && !this.dashLock && !game.menu && game.state === 'play' && (inp.pointerLocked || inp.usingTouch || inp.usingGamepad);
+    return this.alive && !this.dashLock && !game.menu && game.state === 'play' && (!this.ctx.combatInputAllowed || this.ctx.combatInputAllowed()) && (inp.pointerLocked || inp.usingTouch || inp.usingGamepad);
   }
   _updateGrenadeInput(dt) {
     const inp = this.ctx.input, charged = this.weaponRules.key === 'grenades';
@@ -512,6 +516,12 @@ export class Player {
     else {
       if (!this.infiniteGrenades) this.grenades--; this.nadeCd = 0.55; pos = new THREE.Vector3(); vel = new THREE.Vector3(); this._nadeLaunch(clamp(charge, 0, 1), pos, vel);
       this._grenadeThrowFeedback();
+      if (this.ctx.match?.active()) {
+        this.nadeCd = 0.8;
+        const now = this._grenadeNow(), n = this._makeNade(pos, vel, true);
+        Object.assign(n, { charged: true, id: 'team-' + (++this._nadeSeq) + '-' + now, owner: this._grenadeOwner(), phase: 'thrown', expiresAt: now + 1700, thrownAt: now, lastSimAt: now, round: this.ctx.match.state.round });
+        if (this.onThrow) this.onThrow(this._grenadePacket(n)); return true;
+      }
       if (this.onThrow) this.onThrow({ pos: pos.toArray().map((v) => +v.toFixed(2)), vel: vel.toArray().map((v) => +v.toFixed(2)) });
     }
     this._makeNade(pos, vel, !remote);
@@ -533,7 +543,7 @@ export class Player {
   }
   receiveGrenade(data, from, snapshot = false) {
     if (!data || typeof data !== 'object') return false;
-    if (!data.charged) return this.throwGrenade(data);
+    if (!data.charged) { const ok = this.throwGrenade(data); if (ok && this.nades.length) this.nades[this.nades.length - 1].owner = from; return ok; }
     const now = this._grenadeNow();
     if (typeof from !== 'string' || !from || from.length > 128 || typeof data.id !== 'string' || !data.id || data.id.length > 96 ||
       !['armed', 'thrown'].includes(data.phase) || !validNadeVector(data.pos, 10000) || !validNadeVector(data.vel, 150) || !Number.isFinite(data.expiresAt)) return false;
@@ -645,7 +655,16 @@ export class Player {
   explodeNade(n) {
     const ctx = this.ctx, oldId = ctx.currentGrenadeId, oldOwner = ctx.currentGrenadeOwner;
     ctx.currentGrenadeId = n.charged ? n.id : null; ctx.currentGrenadeOwner = n.owner || null;
-    try { this.explode(n.pos, { mine: n.mine, selfDamage: !n.charged || n.mine }); }
+    try {
+      if (ctx.match?.active() && (!ctx.match.canFight() || (n.round != null && n.round !== ctx.match.state.round))) return;
+      if (ctx.match?.active() && !ctx.match.actor(n.owner)) { this.explode(n.pos, { mine: false, selfDamage: false }); return; }
+      const bot = ctx.match?.active() && (n.bot || ctx.match.actor(n.owner)?.bot);
+      if (bot && n.mine && ctx.match.canHurt(n.owner, ctx.match.net.id) && this.alive) {
+        const at = n.pos.clone(); at.y += .25; const d = this.center.distanceTo(at), radius = 6.4 * .95;
+        if (d < radius) ctx.match.net.send('bothit', { id: n.owner, to: ctx.match.net.id, k: 'grenade', round: ctx.match.state.round, gid: n.id, at: at.toArray(), dmg: Math.round(12 + 50 * (1 - d / radius)) });
+      }
+      this.explode(n.pos, { mine: n.mine, selfDamage: ctx.match?.active() ? n.mine && !bot : !n.charged || n.mine });
+    }
     finally { ctx.currentGrenadeId = oldId; ctx.currentGrenadeOwner = oldOwner; }
   }
   _weaponState(sprinting, aiming, hs) {

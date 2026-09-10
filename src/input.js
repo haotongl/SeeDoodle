@@ -4,7 +4,7 @@ import { clamp } from './util.js';
 const KEYMAP = {
   KeyW: 'forward', KeyS: 'back', KeyA: 'left', KeyD: 'right', ArrowUp: 'forward', ArrowDown: 'back', ArrowLeft: 'left', ArrowRight: 'right',
   Space: 'jump', ShiftLeft: 'sprint', ShiftRight: 'sprint', ControlLeft: 'crouch', KeyC: 'crouch',
-  KeyR: 'reload', KeyQ: 'grapple', KeyE: 'grapple', KeyF: 'melee', KeyV: 'melee',
+  KeyR: 'reload', KeyQ: 'grapple', KeyE: 'grapple', KeyF: 'melee', KeyV: 'melee', KeyB: 'interact', KeyN: 'bombDrop',
   Digit1: 'slot1', Digit2: 'slot2', Digit3: 'slot3', Digit4: 'slot4', Digit5: 'slot5', Escape: 'pause', KeyP: 'pause', Enter: 'confirm', KeyG: 'grenade', KeyX: 'dash', AltLeft: 'dash', KeyM: 'music', KeyT: 'talk', Tab: 'score',
 };
 const MOUSEMAP = { 0: 'fire', 2: 'aim', 1: 'grapple', 3: 'grapple', 4: 'melee' };
@@ -128,13 +128,14 @@ export class Input {
       for (const idx in PADMAP) {
         const b = pad.buttons[idx]; if (!b) continue;
         const pressed = b.pressed || b.value > 0.35;
-        if (pressed) { s[PADMAP[idx]] = true; padS[PADMAP[idx]] = true; padActive = true; }
+        const action = idx === '13' && this.objectiveMode ? 'interact' : PADMAP[idx];
+        if (pressed) { s[action] = true; padS[action] = true; padActive = true; }
       }
       if (padActive) { if (!this.usingGamepad && this.onDeviceChange) this.onDeviceChange(true); this.usingGamepad = true; this.anyInput = true; this.lastActive = performance.now(); }
       this._pad = pad;
     } else this._pad = null;
     this.padPrev = this.padState; this.padState = padS;
-    for (const a of ['fire', 'grenade', 'reload', 'aim', 'melee', 'nadeCancel', 'pause']) {
+    for (const a of ['fire', 'grenade', 'reload', 'aim', 'melee', 'nadeCancel', 'pause', 'interact']) {
       this.markHold(a, !!padS[a], 'pad');
       if (!this.timedTouch.has(a)) this.markHold(a, !!this.touchKeys[a], 'touch');
     }
