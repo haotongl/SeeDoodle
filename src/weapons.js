@@ -2,10 +2,11 @@
 // that only exists once you have found one, the katana, and a grenade held for grenade-only play.
 // Rounds are hitscan unless the match is running ballistics; rockets are always real projectiles.
 import * as THREE from 'three';
-import { makeInkMaterial, INK } from './render.js';
+import { makeInkMaterial, setInk, INK } from './render.js';
 import { SEE_THROUGH } from './physics.js';
 import { rand, clamp, damp, lerp, Spring3, TAU } from './util.js';
 import { audio } from './audio.js';
+import { appearanceOf } from './settings.js';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
 const easeOut = (t) => 1 - Math.pow(1 - t, 3);
@@ -15,11 +16,30 @@ function cyl(r, h, x, y, z, mat, parent, axis = 'z', seg = 8) { const g = new TH
 function sph(r, x, y, z, mat, parent, seg = 8) { const m = new THREE.Mesh(new THREE.SphereGeometry(r, seg, seg), mat); m.position.set(x, y, z); parent.add(m); return m; }
 function star(n = 7, r1 = 0.16, r2 = 0.06) { const s = new THREE.Shape(); for (let i = 0; i < n * 2; i++) { const a = (i / (n * 2)) * TAU, r = i % 2 === 0 ? r1 : r2; if (i === 0) s.moveTo(Math.cos(a) * r, Math.sin(a) * r); else s.lineTo(Math.cos(a) * r, Math.sin(a) * r); } s.closePath(); return new THREE.ShapeGeometry(s); }
 function frame(w, h, t, d, x, y, z, mat, parent) { const g = new THREE.Group(); g.position.set(x, y, z); parent.add(g); bx(w, t, d, 0, h / 2, 0, mat, g); bx(w, t, d, 0, -h / 2, 0, mat, g); bx(t, h, d, -w / 2, 0, 0, mat, g); bx(t, h, d, w / 2, 0, 0, mat, g); return g; }
-// doodle fist + forearm heading back toward the shoulder
+const viewMaterials = new Map();
+function viewMaterial(surface, ink = INK.BLACK) {
+  const key = surface + ':' + ink;
+  if (!viewMaterials.has(key)) viewMaterials.set(key, makeInkMaterial({ ink, surface }));
+  return viewMaterials.get(key);
+}
+// Keep both hands on the same animation pivot. Changing clothes must not reset a reload,
+// charge or swing, and none of these appearance meshes participates in damage or aiming.
 function hand(mat, x, y, z, parent, dir = [0.4, -0.5, 1], len = 0.42) {
-  sph(0.062, x, y, z, mat, parent); const d = new THREE.Vector3(...dir).normalize();
-  const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, len, 7), mat); arm.position.set(x + d.x * len / 2, y + d.y * len / 2, z + d.z * len / 2);
-  arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d); parent.add(arm); return arm;
+  const vm = parent.userData.viewModel, d = new THREE.Vector3(...dir).normalize(), arm = new THREE.Group();
+  arm.position.set(x + d.x * len / 2, y + d.y * len / 2, z + d.z * len / 2); arm.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), d); parent.add(arm);
+  const classic = new THREE.Group(), toon = new THREE.Group(); arm.add(classic, toon);
+  sph(0.062, 0, -len / 2, 0, mat, classic); classic.add(new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, len, 7), mat));
+  const cloth = viewMaterial('cloth', vm?._appearanceInk ?? INK.BLUE), skin = viewMaterial('skin', vm?.appearance.tone ?? 2), glove = viewMaterial('cloth');
+  const sleeve = new THREE.Mesh(new THREE.CylinderGeometry(0.085, 0.065, len * 0.73, 10), cloth); sleeve.position.y = len * 0.12; toon.add(sleeve);
+  cyl(0.067, 0.055, 0, -len * 0.24, 0, glove, toon, 'y', 10);
+  cyl(0.043, len * 0.2, 0, -len * 0.36, 0, skin, toon, 'y', 9);
+  const palm = sph(0.076, 0, -len * 0.5, 0, skin, toon, 10); palm.scale.set(1, 0.86, 0.88);
+  const back = sph(0.066, 0, -len * 0.46, -0.027, glove, toon, 9); back.scale.set(1, 0.9, 0.5);
+  sph(0.027, 0.058, -len * 0.49, 0.035, skin, toon, 8);
+  bx(0.055, 0.06, 0.011, 0, len * 0.02, -0.076, viewMaterial('metal'), toon);
+  vm?.appearanceHands.push({ classic, toon, sleeve, skinMeshes: toon.children.filter((o) => o.material === skin) });
+  const shaded = vm?._skin === 'toon'; classic.visible = !shaded; toon.visible = shaded;
+  return arm;
 }
 function makeFlash(parent, x, y, z, scale) {
   const fm = makeInkMaterial({ ink: INK.ORANGE, fill: true, side: THREE.DoubleSide }); const g = new THREE.Group();
@@ -31,6 +51,7 @@ function makeFlash(parent, x, y, z, scale) {
 class ViewModel {
   constructor(ctx) {
     this.ctx = ctx; this.root = new THREE.Group(); this.scale = 0.46; this.root.scale.setScalar(this.scale); this.root.visible = false;
+    this.root.userData.viewModel = this; this.appearanceHands = []; this.appearance = appearanceOf(); this._skin = ctx.skin?.() === 'toon' ? 'toon' : 'classic'; this._appearanceInk = INK.BLUE;
     this.basePos = new THREE.Vector3(0.2, -0.17, -0.36); this.baseRot = new THREE.Vector3(0, 0, 0);
     this.aimPos = new THREE.Vector3(0, -0.13, -0.3); this.adsFov = 60; this.isGun = false;
     this.recoil = new Spring3(260, 18); this.recoilRot = new Spring3(220, 16);
@@ -38,6 +59,18 @@ class ViewModel {
     this.aimAmt = 0; this.sprintAmt = 0; this.equipT = 0;
   }
   get allowed() { return !this.ctx.player?.weaponAllowed || this.ctx.player.weaponAllowed(this.kind); }
+  setSkin(key, ink = INK.BLUE) {
+    this._skin = key === 'toon' ? 'toon' : 'classic'; this._appearanceInk = ink;
+    const toon = this._skin === 'toon';
+    if (this.mat) setInk(this.mat, toon ? ink : INK.BLUE);
+    for (const h of this.appearanceHands) { h.classic.visible = !toon; h.toon.visible = toon; h.sleeve.material = viewMaterial('cloth', ink); }
+    if (this.appearanceDetails) this.appearanceDetails.visible = toon;
+  }
+  setAppearance(value) {
+    this.appearance = appearanceOf(value);
+    const skin = viewMaterial('skin', this.appearance.tone);
+    for (const h of this.appearanceHands) for (const m of h.skinMeshes) m.material = skin;
+  }
   setSight(x, y, z, dist) { this.aimPos.set(-x * this.scale, -y * this.scale, -z * this.scale - dist); }
   equip() { this.equipT = 0; this.root.visible = true; }
   unequip() { this.root.visible = false; }
@@ -84,8 +117,30 @@ export class Gun extends ViewModel {
     // How many rounds into the current burst we are, and how long that count has left to live. The
     // recoil pattern is a function of this: see `fire`.
     this.burst = 0; this.burstT = 0;
-    this.mat = makeInkMaterial({ ink: INK.BLUE }); this.dark = makeInkMaterial({ ink: INK.BLACK }); this.red = makeInkMaterial({ ink: INK.RED, fill: true });
-    this.build(); this.setSight(...this.sight);
+    this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }); this.dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }); this.red = makeInkMaterial({ ink: INK.RED, fill: true });
+    this.build(); this._finishAppearance(); this.setSight(...this.sight);
+  }
+  _finishAppearance() {
+    const g = this.appearanceDetails = new THREE.Group(); this.root.add(g);
+    const black = viewMaterial('cloth'), metal = viewMaterial('metal'), accent = this.mat;
+    if (this.kind !== 'revolver') {
+      const side = this.kind === 'rocket' ? 0.087 : 0.05;
+      for (const s of [-1, 1]) {
+        bx(0.008, 0.033, 0.17, s * side, 0.025, this.kind === 'rocket' ? -0.25 : 0.025, black, g);
+        for (let i = 0; i < 3; i++) bx(0.01, 0.018, 0.018, s * (side + 0.002), 0.026, -0.032 + i * 0.05, accent, g);
+      }
+      if (this.magMesh) {
+        for (const s of [-1, 1]) for (let i = 0; i < 3; i++) bx(0.006, 0.012, 0.064, s * 0.031, -0.06 + i * 0.032, 0, black, this.magMesh).userData.toonPanel = true;
+      }
+    }
+    if (this.kind === 'shotgun' && this.foreEnd) for (let i = 0; i < 5; i++) bx(0.082, 0.088, 0.012, 0, 0, -0.1 + i * 0.045, black, this.foreEnd).userData.toonPanel = true;
+    if (this.kind === 'sniper') cyl(0.05, 0.008, 0, 0.135, 0.181, viewMaterial('glass'), g);
+    if (this.kind === 'revolver') cyl(0.008, 0.049, 0, -0.09, 0.073, metal, g, 'x', 7);
+    this.setSkin(this._skin, this._appearanceInk);
+  }
+  setSkin(key, ink = INK.BLUE) {
+    super.setSkin(key, ink);
+    this.root.traverse((o) => { if (o.userData.toonPanel) o.visible = this._skin === 'toon'; });
   }
   get spreadPx() { return 5 + this.spreadCur * 900; }
   // A thumb dragging a screen cannot make the small corrections a mouse can, so on a phone the guns
@@ -363,11 +418,15 @@ export class Grenade extends ViewModel {
   constructor(ctx) {
     super(ctx); this.name = 'GRENADES'; this.hint = 'hold fire or grenade to aim - release to throw'; this.kind = 'grenade'; this.locked = true;
     this.basePos.set(0.2, -0.2, -0.38); this.aimPos.copy(this.basePos);
-    const mat = makeInkMaterial({ ink: INK.BLUE }), dark = makeInkMaterial({ ink: INK.BLACK }), orange = makeInkMaterial({ ink: INK.ORANGE });
+    const mat = this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }), dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }), orange = makeInkMaterial({ ink: INK.ORANGE, surface: 'metal' });
     sph(0.16, 0, 0, 0, dark, this.root);
     cyl(0.06, 0.1, 0, 0.17, 0, orange, this.root, 'y', 6);
     const pin = new THREE.Mesh(new THREE.TorusGeometry(0.07, 0.02, 4, 8), orange); pin.position.set(0, 0.24, 0); this.root.add(pin);
     hand(mat, 0, -0.1, 0.035, this.root, [0.45, -0.5, 1]);
+    const g = this.appearanceDetails = new THREE.Group(); this.root.add(g);
+    for (const y of [-0.065, 0.04]) { const band = new THREE.Mesh(new THREE.TorusGeometry(Math.sqrt(0.16 * 0.16 - y * y), 0.012, 5, 12), mat); band.rotation.x = Math.PI / 2; band.position.y = y; g.add(band); }
+    bx(0.035, 0.2, 0.03, 0.11, 0.15, 0, orange, g).rotation.z = -0.3;
+    this.setSkin(this._skin, this._appearanceInk);
   }
   get spreadPx() { return 4; }
   update() {
@@ -385,10 +444,10 @@ export class Katana extends ViewModel {
     // guard pose: the sword simply comes in close to the face, held upright
     this.blockPos = new THREE.Vector3(0.21, -0.31, -0.36); this.blockRot = new THREE.Vector3(1.40, 0.30, 1.24); this.deflectKick = 0;
     this.parrySwing = 0; this.parryDir = 1; this.bloodLevel = 0;
-    this.build();
+    this.build(); this.setSkin(this._skin, this._appearanceInk);
   }
   build() {
-    const mat = makeInkMaterial({ ink: INK.BLUE }), dark = makeInkMaterial({ ink: INK.BLACK }); const g = this.root;
+    const mat = this.mat = makeInkMaterial({ ink: INK.BLUE, surface: 'metal' }), dark = makeInkMaterial({ ink: INK.BLACK, surface: 'metal' }); const g = this.root;
     this.blade = bx(0.012, 0.035, 1.0, 0, 0, -0.55, mat, g); bx(0.012, 0.02, 0.08, 0, 0.007, -1.07, mat, g).rotation.x = 0.3;
     bx(0.1, 0.1, 0.02, 0, 0, -0.05, dark, g); bx(0.03, 0.036, 0.3, 0, 0, 0.12, dark, g);
     for (let i = 0; i < 6; i++) bx(0.036, 0.04, 0.02, 0, 0, 0.02 + i * 0.045, mat, g);

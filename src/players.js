@@ -4,8 +4,9 @@
 // whether it is shooting at a bot or a friend.
 import * as THREE from 'three';
 import { makeInkMaterial, setFill, setInk, INK, INK_COLORS } from './render.js';
-import { buildHumanoid, buildWeaponProp } from './enemies.js';
+import { buildHumanoid, buildWeaponProp, disposeModelGeometry } from './enemies.js';
 import { SEE_THROUGH } from './physics.js';
+import { appearanceOf } from './settings.js';
 import { clamp, damp, angleLerp, wrapAngle } from './util.js';
 
 const _v = new THREE.Vector3(), _v2 = new THREE.Vector3(), _up = new THREE.Vector3(0, 1, 0);
@@ -33,20 +34,21 @@ export function encodeLocal(P, weaponIndex, extra = {}) {
 }
 
 export class RemotePlayer {
-  constructor(ctx, id, name, team, ink) {
+  constructor(ctx, id, name, team, ink, appearance) {
     this.ctx = ctx; this.id = id; this.name = name || 'doodle'; this.team = team; this.ink = ink;
+    this.appearance = appearanceOf(appearance);
     this.isLocal = false; this.alive = true; this.parryWindow = false; this.idle = false; this.idleSince = 0; this.untouched = false; this.away = false; this.hp = 100; this.maxHp = 100; this.speed = 0; this.weaponIndex = 0;
     this.body = { pos: new THREE.Vector3(0, -50, 0), vel: new THREE.Vector3(), halfW: 0.35, height: 1.75, onGround: true };
     this.center = new THREE.Vector3(); this.eye = new THREE.Vector3(); this.forward = new THREE.Vector3(0, 0, -1); this.right = new THREE.Vector3(1, 0, 0);
     this.yaw = 0; this.pitch = 0; this.crouching = false; this.sliding = false; this.blocking = false; this.aiming = false; this.firing = false;
     this.snapA = null; this.snapB = null; this.phase = 0; this.walk = 0; this.flashT = 0; this.deadT = 0; this.kills = 0; this.deaths = 0; this.score = 0;
-    this.mat = makeInkMaterial({ ink, shadeScale: 0, shadeBias: 1 }); this.solid = makeInkMaterial({ ink: INK.BLACK, fill: true, side: THREE.DoubleSide });
+    this.mat = makeInkMaterial({ ink, surface: 'cloth', shadeScale: 0, shadeBias: 1 }); this.solid = makeInkMaterial({ ink: INK.BLACK, fill: true, side: THREE.DoubleSide });
     this.tagMat = makeInkMaterial({ ink, fill: true, side: THREE.DoubleSide });
     this.nameTag = document.createElement('div'); this.nameTag.className = 'player-nametag'; this.nameTag.hidden = true;
     this.nameTag.dir = 'auto'; this.nameTag.textContent = this.name;
     this.nameTag.style.setProperty('--player-color', playerColorCSS(PLAYER_INKS.indexOf(ink)));
     ctx.hud.root.prepend(this.nameTag); this._nameSightAt = 0; this._nameInSight = false;
-    this.T = { weapon: 'rifle', scale: 1.0, hat: 'cap', build: { bodyW: 1, headS: 1, limbR: 0.033 }, blockRadius: 0 };
+    this.T = { weapon: 'rifle', scale: 1.0, hat: 'cap', skin: ctx.skin?.() === 'toon' ? 'toon' : 'classic', appearance: this.appearance, build: { bodyW: 1, headS: 1, limbR: 0.033 }, blockRadius: 0 };
     this.hit = HIT; this.hitSpheres = HIT.map(() => new THREE.Vector3()); this.vel = new THREE.Vector3(); this.grappling = false; this.gPoint = new THREE.Vector3();
     this._buildModel();
     // the grapple rope: a thin line from the hand to wherever the hook is
@@ -57,19 +59,36 @@ export class RemotePlayer {
     const model = buildHumanoid(this.mat, this.solid, this.T);
     this.root = model.root; this.parts = model.parts; this.J = model.J; this.face = model.face;
     this.root.visible = false; this.ctx.scene.add(this.root); this.weaponIndex = -1;
-    // The world-space flag shares its ink with the screen-space username.
-    this.tagG = new THREE.Group(); this.root.add(this.tagG); this.tagG.position.y = 2.25;
-    const flag = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.28, 0.02), this.tagMat); this.tagG.add(flag);
+    // The jacket and compact username carry identity; retain the anchor without a floating flag.
+    this.tagG = new THREE.Group(); this.root.add(this.tagG); this.tagG.position.y = 2.25; this.tagG.visible = false;
     this.corpse = false;
   }
   setInk(ink) { this.ink = ink; setInk(this.mat, ink); setInk(this.tagMat, ink); this.nameTag.style.setProperty('--player-color', playerColorCSS(PLAYER_INKS.indexOf(ink))); }
+  setSkin(key) {
+    const skin = key === 'toon' ? 'toon' : 'classic'; if (this.T.skin === skin) return;
+    this.T.skin = skin; this._refreshModel();
+  }
+  setAppearance(value) {
+    const appearance = appearanceOf(value), old = this.appearance;
+    if (old.gender === appearance.gender && old.tone === appearance.tone && old.hair === appearance.hair) return;
+    this.appearance = this.T.appearance = appearance;
+    if (this.T.skin === 'toon') this._refreshModel();
+  }
+  _refreshModel() {
+    // Debris belongs to Effects after a death. Leave that body alone; respawn will use this skin.
+    if (!this.root || this.corpse) return;
+    const previous = this.root, weapon = this.weaponIndex, visible = previous.visible;
+    this._buildModel(); this.setWeapon(weapon); this.root.position.copy(previous.position); this.root.rotation.copy(previous.rotation); this.root.visible = visible;
+    this._animate(0); this.root.updateMatrixWorld(true);
+    this.ctx.scene.remove(previous); disposeModelGeometry(previous); this._nameSightAt = 0;
+  }
   updateNameTag(show, now = performance.now() / 1000) {
     const tag = this.nameTag, camera = this.ctx.camera;
     if (!show || !this.root || !this.root.visible || !this.alive || this.corpse || this.away) { tag.hidden = true; this._nameSightAt = 0; return; }
     _tagHead.setFromMatrixPosition(this.parts.head.matrixWorld);
     _tagEye.setFromMatrixPosition(camera.matrixWorld);
     const distance = _tagEye.distanceTo(_tagHead);
-    _tagScreen.copy(_tagHead); _tagScreen.y += 0.65; _tagScreen.project(camera);
+    _tagScreen.copy(_tagHead); _tagScreen.y += 0.44; _tagScreen.project(camera);
     if (distance > 120 || _tagScreen.z < -1 || _tagScreen.z > 1 || Math.abs(_tagScreen.x) > 1 || Math.abs(_tagScreen.y) > 1) { tag.hidden = true; this._nameSightAt = 0; return; }
     // Test the actual head, not the floating label: a name above a wall must not reveal its owner.
     // Ten checks a second per visible player keeps the map's collider scan out of every frame.
@@ -79,7 +98,7 @@ export class RemotePlayer {
     if (tag.textContent !== this.name) tag.textContent = this.name;
     const x = (_tagScreen.x * 0.5 + 0.5) * window.innerWidth, y = (0.5 - _tagScreen.y * 0.5) * window.innerHeight;
     tag.style.transform = `translate3d(${x.toFixed(1)}px, ${y.toFixed(1)}px, 0) translate(-50%, -100%)`;
-    tag.style.opacity = Math.max(0.45, 1 - Math.max(0, distance - 30) / 160).toFixed(2);
+    tag.style.opacity = (0.55 * Math.max(0.45, 1 - Math.max(0, distance - 30) / 160)).toFixed(2);
   }
   // knocked flat with some physics: the whole figure tumbles away as debris (bits come off on a
   // big hit), and a fresh figure is drawn when the player comes back
@@ -103,9 +122,11 @@ export class RemotePlayer {
   get blockRadius() { return 0; }
   setWeapon(i) {
     if (i === this.weaponIndex && this.J.gun.children.length) return; this.weaponIndex = i;
-    const gun = this.J.gun; while (gun.children.length) gun.remove(gun.children[0]);
+    const gun = this.J.gun; disposeModelGeometry(gun); gun.clear();
     const kind = WEAPON_KINDS[i] || 'rifle';
-    if (kind === 'grenade') {
+    gun.rotation.x = this.T.skin === 'toon' && !['blade', 'grenade'].includes(kind) ? Math.PI / 2 : 0;
+    if (this.T.skin === 'toon') buildWeaponProp(gun, this.mat, this.solid, { weapon: kind, skin: 'toon' });
+    else if (kind === 'grenade') {
       const body = new THREE.Mesh(new THREE.SphereGeometry(0.14, 8, 6), this.mat); body.position.set(0, 0.03, 0.08); gun.add(body);
       const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.09, 6), this.solid); cap.position.set(0, 0.17, 0.08); gun.add(cap);
       const pin = new THREE.Mesh(new THREE.TorusGeometry(0.055, 0.016, 4, 8), this.solid); pin.position.set(0, 0.24, 0.08); gun.add(pin);
@@ -200,5 +221,10 @@ export class RemotePlayer {
     J.headG.rotation.x = clamp(-this.pitch, -0.7, 0.7) * 0.7;
     this.tagG.rotation.y = -this.root.rotation.y + (this.ctx.player ? Math.atan2(this.ctx.player.eye.x - this.body.pos.x, this.ctx.player.eye.z - this.body.pos.z) : 0);
   }
-  dispose() { this.nameTag.remove(); if (this.root) this.ctx.scene.remove(this.root); this.ctx.scene.remove(this.rope); this.ctx.scene.remove(this.hook); }
+  dispose() {
+    this.nameTag.remove();
+    if (this.root) { this.ctx.scene.remove(this.root); disposeModelGeometry(this.root); }
+    for (const o of [this.rope, this.hook]) { this.ctx.scene.remove(o); o.geometry.dispose(); o.material.dispose(); }
+    // A departed player's ragdoll may still use the body materials until Effects removes it.
+  }
 }

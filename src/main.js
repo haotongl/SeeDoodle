@@ -9,7 +9,7 @@ import { Input } from './input.js';
 import { buildLevel, LEVELS } from './level.js';
 import { NavGrid } from './nav.js';
 import { Effects } from './effects.js';
-import { EnemyManager, BOSSES } from './enemies.js';
+import { EnemyManager, BOSSES, buildHumanoid, disposeModelGeometry } from './enemies.js';
 import { Player } from './player.js';
 import { Bullets } from './bullets.js';
 import { RemotePlayer, encodeLocal, PLAYER_INKS, validPlayerColor, playerInk, playerColorCSS } from './players.js';
@@ -18,7 +18,7 @@ import { HUD, CONTROLS_HTML } from './hud.js';
 import { isTouchDevice, TouchControls, TOUCH_CONTROLS_HTML } from './touch.js';
 import { t, ts, trDom, getLang, setLang, LANGS } from './i18n.js';
 import { audio } from './audio.js';
-import { SETTINGS, DIFFICULTY, MOBILITY, WEAPON_MODES, diffOf, mobOf, weaponModeOf, loadSettings, saveSettings } from './settings.js';
+import { SETTINGS, DIFFICULTY, MOBILITY, WEAPON_MODES, SKINS, APPEARANCE_OPTIONS, diffOf, mobOf, weaponModeOf, skinOf, appearanceOf, loadSettings, saveSettings } from './settings.js';
 import { rand, choose, clamp } from './util.js';
 
 const canvas = document.getElementById('c');
@@ -32,6 +32,10 @@ const knownMap = (k) => (LEVELS.some((m) => m.key === k) ? k : 'district');
 const arenaMaps = (ffa) => LEVELS.filter((m) => ffa || !m.pvpOnly);
 const playable = (k, ffa) => (arenaMaps(ffa).some((m) => m.key === k) ? k : 'district');
 let mapKey = playable(localStorage.getItem('doodle_map') || 'district', false);
+let skinKey = skinOf(localStorage.getItem('doodle_skin')).key;
+let myAppearance = appearanceOf();
+try { myAppearance = appearanceOf(JSON.parse(localStorage.getItem('doodle_appearance'))); } catch (e) { /* an old or incomplete preference uses the defaults */ }
+let appearanceOpen = false, appearancePreview = null;
 let level = buildLevel(R.scene, world, mapKey, { arena: false });
 let nav = new NavGrid(world, level.bounds, 1).build();
 let loadedKey = mapKey, arenaLoaded = false;
@@ -43,6 +47,8 @@ function setLevel(key, on, force = false) {
   level.animated.length = 0; world.clear();
   level = buildLevel(R.scene, world, key, { arena: on }); nav = new NavGrid(world, level.bounds, 1).build();
   ctx.level = level; ctx.nav = nav; if (window.__game) { window.__game.level = level; window.__game.nav = nav; }
+  R.setMap?.(key);
+  for (const m of level.meshes) if (m.userData.skin) m.visible = m.userData.skin === ctx.skin();
   audio.setTune(key === 'mexico' ? 'mexico' : 'district');
 }
 const setArena = (on) => setLevel(playable(net.active ? (lobby.map || mapKey) : mapKey, on), on);
@@ -90,7 +96,7 @@ const bullets = ctx.bullets = new Bullets(ctx);
 player.name = myName;
 const net = new Net();
 const remote = new Map();      // peer id -> RemotePlayer
-const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal' };
+const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal', skin: 'classic' };
 const colorSeats = new Map(); // recently departed ids -> { color, until }, shared with the next host
 const scores = new Map();      // peer id -> { name, kills, deaths }
 let screen = 'main';           // which start-screen panel is showing: main | online | lobby
@@ -104,7 +110,15 @@ ctx.difficulty = () => (net.active ? lobby.diff : settings.difficulty) || 'easy'
 // is the full kit. In versus it is the host's pick, same as the map and the ballistics.
 ctx.mobility = () => (versus() ? lobby.mob || 'mid' : null);
 ctx.weaponMode = () => net.connected ? weaponModeOf(lobby.weaponMode).key : 'normal';
-function applyRules() { player.applyDifficulty(ctx.difficulty()); player.applyMobility(ctx.mobility()); player.applyWeaponMode(ctx.weaponMode()); if (touch) touch.setWeaponMode(ctx.weaponMode()); }
+ctx.skin = () => net.connected ? skinOf(lobby.skin).key : skinKey;
+function applySkin() {
+  const key = ctx.skin();
+  R.setSkin?.(key); R.setMap?.(loadedKey); document.body.dataset.skin = key;
+  for (const m of level.meshes) if (m.userData.skin) m.visible = m.userData.skin === key;
+  for (const w of player.weapons) { w.setAppearance?.(myAppearance); w.setSkin?.(key, net.connected ? player.ink ?? INK.BLUE : INK.BLUE); }
+  for (const r of remote.values()) r.setSkin?.(key);
+}
+function applyRules() { player.applyDifficulty(ctx.difficulty()); player.applyMobility(ctx.mobility()); player.applyWeaponMode(ctx.weaponMode()); if (touch) touch.setWeaponMode(ctx.weaponMode()); applySkin(); }
 // anything a bullet or a blade can hit besides enemies
 ctx.targets = () => [player, ...remote.values()];
 // co-op is one team: your shots pass through your friends and only the enemies bleed
@@ -596,9 +610,9 @@ function endMatch(winner) {
 }
 
 // ---------------- networking ----------------
-function addRemote(id, name, color) {
-  if (remote.has(id)) { const r = remote.get(id); r.name = name; r.setInk(playerInk(color)); return r; }
-  const rp = new RemotePlayer(ctx, id, name, 0, playerInk(color));
+function addRemote(id, name, color, appearance) {
+  if (remote.has(id)) { const r = remote.get(id); r.name = name; r.setInk(playerInk(color)); r.setAppearance(appearance); return r; }
+  const rp = new RemotePlayer(ctx, id, name, 0, playerInk(color), appearance);
   rp.onDamage = (t, amount, fromPos) => {
     if (!t.alive || amount <= 0) return;
     const at = fromPos ? fromPos.toArray().map((v) => +v.toFixed(1)) : null;
@@ -617,7 +631,7 @@ function removeRemote(id) {
   const p = lobby.players.get(id); if (p && validPlayerColor(p.color)) colorSeats.set(id, { color: p.color, until: Date.now() + 60000 });
   const r = remote.get(id); if (r) { r.dispose(); remote.delete(id); } lobby.players.delete(id); scores.delete(id); stalled.delete(id);
 }
-function lobbyRows() { return [...lobby.players.entries()].map(([id, p]) => ({ id, name: p.name, color: p.color })); }
+function lobbyRows() { return [...lobby.players.entries()].map(([id, p]) => ({ id, name: p.name, color: p.color, appearance: appearanceOf(p.appearance) })); }
 function reservedColors() { for (const [id, seat] of colorSeats) if (seat.until <= Date.now()) colorSeats.delete(id); return [...colorSeats.entries()].map(([id, seat]) => ({ id, ...seat })); }
 // Leaving never renumbers the remaining seats. Keep a departed colour warm for automatic rejoin,
 // including when that player was the host; reservations travel with the roster to its successor.
@@ -634,15 +648,18 @@ function applyLobbyPlayers(rows, reservations) {
   for (const id of [...lobby.players.keys()]) if (!ids.has(id)) removeRemote(id);
   if (Array.isArray(reservations)) { colorSeats.clear(); for (const p of reservations) if (validPlayerColor(p.color) && p.until > Date.now()) colorSeats.set(p.id, { color: p.color, until: p.until }); }
   const previous = new Map(lobby.players); lobby.players.clear(); lobby.order = rows.map((p) => p.id);
-  for (const p of rows) lobby.players.set(p.id, { name: p.name, color: validPlayerColor(p.color) ? p.color : previous.get(p.id)?.color ?? 0 });
+  for (const p of rows) lobby.players.set(p.id, { name: p.name, color: validPlayerColor(p.color) ? p.color : previous.get(p.id)?.color ?? 0, appearance: appearanceOf(p.appearance ?? previous.get(p.id)?.appearance) });
   for (const [id, p] of lobby.players) {
     colorSeats.delete(id);
-    if (id !== net.id) addRemote(id, p.name, p.color);
+    if (id !== net.id) addRemote(id, p.name, p.color, p.appearance);
     else { player.color = p.color; player.ink = playerInk(p.color); }
   }
   for (const id of [...remote.keys()]) if (!lobby.players.has(id) || id === net.id) { const r = remote.get(id); r.dispose(); remote.delete(id); }
+  applySkin();
+  const mine = lobby.players.get(net.id);
+  if (!net.isHost && mine && JSON.stringify(mine.appearance) !== JSON.stringify(myAppearance)) net.send('appearance', myAppearance);
 }
-function broadcastLobby() { net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), shown: net.aliasCode || net.code }); renderLobby(); }
+function broadcastLobby() { net.send('lobby', { players: lobbyRows(), colors: reservedColors(), hostId: net.id, isPublic: lobby.isPublic, map: lobby.map || mapKey, mode: lobby.gameMode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), shown: net.aliasCode || net.code }); renderLobby(); }
 const inMatch = () => ['play', 'dying', 'over'].includes(game.state);
 let boardT = 0;   // seconds since the open scoreboard was last redrawn
 net.onPeerLeave = (id) => { const nm = (lobby.players.get(id) || {}).name; removeRemote(id); broadcastLobby(); if (inMatch()) { hud.kill(t`${nm || ts('someone')} left`, 0); sendScores(); } };
@@ -662,6 +679,12 @@ net.onStall = (quiet, res) => {
   } else net.send('lobbyreq', {});
 };
 net.on('lobbyreq', () => { if (net.isHost) broadcastLobby(); });
+net.on('appearance', (value, from) => {
+  if (!net.isHost) return;
+  const p = lobby.players.get(from); if (!p) return;
+  const next = appearanceOf(value); if (JSON.stringify(next) === JSON.stringify(p.appearance)) return;
+  p.appearance = next; remote.get(from)?.setAppearance(next); broadcastLobby();
+});
 net.onPeerStall = (id, quiet) => {
   const nm = (lobby.players.get(id) || {}).name || 'someone';
   if (quiet) stalled.add(id); else stalled.delete(id);
@@ -697,11 +720,12 @@ net.onPeerJoin = (from, meta) => {
   const name = String(meta && meta.name || 'doodle').slice(0, 14);
   const prev = meta && meta.prev !== from && !net.conns.has(meta.prev) ? meta.prev : null;
   const color = assignPlayerColor(from, prev);
+  const appearance = appearanceOf(meta?.appearance ?? lobby.players.get(from)?.appearance ?? lobby.players.get(prev)?.appearance);
   if (prev) { const sc = scores.get(prev); if (sc) { scores.delete(prev); scores.set(from, sc); } const r = remote.get(prev); if (r) r.dispose(); remote.delete(prev); lobby.players.delete(prev); colorSeats.delete(prev); if (lobby.order) lobby.order = lobby.order.filter((id) => id !== prev); }
-  colorSeats.delete(from); lobby.players.set(from, { name, color }); addRemote(from, name, color); broadcastLobby();
+  colorSeats.delete(from); lobby.players.set(from, { name, color, appearance }); addRemote(from, name, color, appearance); broadcastLobby();
   if (game.state === 'play' || game.state === 'dying') {
     if (!scores.has(from)) scores.set(from, { name, kills: 0, deaths: 0 });
-    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
+    net.sendTo(from, 'start', { late: true, players: lobbyRows(), colors: reservedColors(), spawn: farthestSpawnIndex(), map: lobby.map || mapKey, mode: game.mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin(), broken: level.breakables.filter((b) => !b.alive).map((b) => b.id) });
     // a latecomer has an empty world until it is told what is already standing in it
     if (coopHost()) setTimeout(() => sendCoopCatchUp(from), 350);
     sendScores(); hud.kill(t`${name} joined`, 0);
@@ -709,13 +733,13 @@ net.onPeerJoin = (from, meta) => {
 };
 net.on('lobby', (d, from) => {
   if (net.isHost || from !== net.hostId || !Array.isArray(d.players)) return;
-  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = d.mode === 'coop' ? 'coop' : 'ffa'; lobby.ballistics = !!d.bal; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; applyRules();
+  lobby.hostId = d.hostId; lobby.isPublic = !!d.isPublic; lobby.code = net.code; lobby.shown = d.shown || net.code; if (d.map) lobby.map = knownMap(d.map); lobby.gameMode = d.mode === 'coop' ? 'coop' : 'ffa'; lobby.ballistics = !!d.bal; if (d.mob) lobby.mob = d.mob; if (d.diff) lobby.diff = d.diff; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; applyRules();
   applyLobbyPlayers(d.players, d.colors);
   if (inMatch()) { for (const p of d.players) if (!scores.has(p.id)) scores.set(p.id, { name: p.name, kills: 0, deaths: 0 }); refreshScoreHud(); }
   renderLobby();
 });
 net.on('leave', (d) => { const nm = (lobby.players.get(d.id) || {}).name; removeRemote(d.id); if (inMatch()) hud.kill(t`${nm || ts('someone')} left`, 0); renderLobby(); });
-net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, d.mode === 'coop' ? 'coop' : 'ffa'); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
+net.on('start', (d, from) => { if (net.isHost || from !== net.hostId) return; if (d.players) applyLobbyPlayers(d.players, d.colors); if (d.map) lobby.map = knownMap(d.map); if (d.bal !== undefined) lobby.ballistics = !!d.bal; if (d.diff) lobby.diff = d.diff; if (d.mob) lobby.mob = d.mob; lobby.weaponMode = weaponModeOf(d.weaponMode).key; lobby.skin = skinOf(d.skin).key; startMatch(!!d.late, d.spawns ? d.spawns[net.id] : d.spawn, d.mode === 'coop' ? 'coop' : 'ffa'); if (d.broken) for (const id of d.broken) { const br = level.breakables[id]; if (br) breakProp(br, null, false, true); } });
 net.on('startreq', () => { if (net.isHost && game.state === 'lobby') hostStart(); });
 
 // ---------------- co-op: the host owns the enemies, everyone else mirrors them ----------------
@@ -902,7 +926,7 @@ function coopUpdate(dt) {
 }
 function leaveOnline(reason) {
   net.leave(); for (const id of [...remote.keys()]) removeRemote(id); lobby.players.clear(); colorSeats.clear(); scores.clear(); hud.setBoard(null);
-  player.applyWeaponMode('normal'); if (touch) touch.setWeaponMode('normal');
+  player.applyWeaponMode('normal'); if (touch) touch.setWeaponMode('normal'); applySkin();
   if (game.state !== 'start') { game.state = 'start'; game.mode = 'solo'; setArena(false); resetGame(); hud.setGameplayVisible(false); }
   game.menu = false; lobby.status = reason || ''; screen = 'online'; showStart();
 }
@@ -910,16 +934,16 @@ async function createLobby(isPublic) {
   setStatus('opening a lobby…');
   try { await net.host({ isPublic }); }
   catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
-  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); colorSeats.clear(); lobby.players.set(net.id, { name: myName, color: 0 }); player.color = 0; player.ink = playerInk(0); lobby.hostId = net.id; lobby.status = ''; lobby.weaponMode = 'normal'; applyRules();
+  lobby.isPublic = isPublic; lobby.map = mapKey; lobby.ballistics = settings.ballistics; lobby.diff = settings.difficulty; lobby.mob = lobby.mob || 'mid'; lobby.players.clear(); colorSeats.clear(); lobby.players.set(net.id, { name: myName, color: 0, appearance: myAppearance }); player.color = 0; player.ink = playerInk(0); lobby.hostId = net.id; lobby.status = ''; lobby.weaponMode = 'normal'; lobby.skin = skinKey; net._meta = { name: myName, appearance: myAppearance }; applyRules();
   game.state = 'lobby'; screen = 'lobby'; showStart();
 }
 async function joinLobby(code) {
   setStatus('connecting…');
-  try { await net.join(code, { name: myName }); } catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
+  try { await net.join(code, { name: myName, appearance: myAppearance }); } catch (err) { setStatus(friendlyError(err)); unlockButtons(); return; }
   lobby.isPublic = net.isPublic; lobby.status = ''; game.state = 'lobby'; screen = 'lobby'; showStart();
 }
 async function quickPlay() {
-  try { await net.quickJoin({ name: myName }, setStatus); lobby.isPublic = true; lobby.status = ''; game.state = 'lobby'; screen = 'lobby'; showStart(); return; }
+  try { await net.quickJoin({ name: myName, appearance: myAppearance }, setStatus); lobby.isPublic = true; lobby.status = ''; game.state = 'lobby'; screen = 'lobby'; showStart(); return; }
   catch (err) { if (!/no open public/.test(String(err.message))) { setStatus(friendlyError(err)); unlockButtons(); return; } }
   setStatus('no open lobbies · opening a public one for you…');
   await createLobby(true);
@@ -1037,8 +1061,67 @@ function mapHTML(sel, canPick, ffa = false) { const list = arenaMaps(ffa); if (l
 function wireMap(onPick) { const box = hud.el.panel.querySelector('#mapsel'); if (!box) return; box.addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('.mapbtn'); if (b && !b.disabled) onPick(b.dataset.map); }); }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 
+function skinHTML(selected, canPick, room = false) {
+  const sketch = '<svg viewBox="0 0 260 110" aria-hidden="true"><g fill="none" stroke="currentColor" stroke-width="2"><path d="M12 98H250M27 98V40H79V98M37 40V27H67V40M99 98V57H158V98M181 98V20H231V98M176 20H237M28 70H79M181 50H231M99 79H158M119 57V45H146V57"/><path d="M39 50H51V61H39ZM57 50H69V61H57ZM39 78H52V94M193 32H204V43H193ZM214 32H224V43H214ZM193 60H204V74H193ZM214 60H224V74H214Z"/><circle cx="133" cy="20" r="9"/><path d="M8 21L89 22M172 88L233 87M10 106L254 105"/></g></svg>';
+  return `<section class="skin-select" id="skinsel" aria-label="${ts('world skin')}"><div class="skin-heading"><span>${ts('world skin')}</span><small>${ts(room ? 'the host chooses the skin for everyone' : 'your choice is saved on this device')}</small></div><div class="skin-options">${Object.values(SKINS).map((s) => `<button type="button" class="skin-card${selected === s.key ? ' on' : ''}" data-skin="${s.key}" aria-pressed="${selected === s.key}" ${canPick ? '' : 'disabled'}><span class="skin-preview skin-preview-${s.key}">${s.key === 'classic' ? sketch : ''}<span class="skin-check" aria-hidden="true">${selected === s.key ? '&#10003;' : '+'}</span></span><span class="skin-caption"><b>${ts(s.name)}</b><i>${ts(s.blurb)}</i></span></button>`).join('')}</div></section>`;
+}
+function wireSkin() {
+  const box = hud.el.panel.querySelector('#skinsel'); if (!box) return;
+  box.addEventListener('click', (e) => {
+    e.stopPropagation(); const b = e.target.closest('button[data-skin]');
+    if (!b || b.disabled || (net.connected && (!net.isHost || game.state !== 'lobby'))) return;
+    skinKey = skinOf(b.dataset.skin).key; localStorage.setItem('doodle_skin', skinKey);
+    if (skinKey === 'toon') appearanceOpen = true;
+    if (net.connected) { lobby.skin = skinKey; applySkin(); broadcastLobby(); }
+    else { applySkin(); showStart(); }
+  });
+}
+function appearanceHTML() {
+  const color = playerColorCSS(net.connected ? player.color : 0);
+  return `<details class="avatar-editor" id="avatarEditor" ${appearanceOpen ? 'open' : ''}><summary><b>${ts('YOUR CHARACTER')}</b><span>${ts('choose your look, keep your color')}</span></summary><div class="avatar-content"><div class="avatar-portrait"><img id="avatarPreview" alt="${ts('your character preview')}"><span class="outfit-color"><i style="background:${color}"></i>${ts('assigned outfit color')}</span></div><div class="avatar-controls"><label><span>${ts('gender expression')}</span><select data-appearance="gender">${APPEARANCE_OPTIONS.gender.map((o) => `<option value="${o.key}" ${o.key === myAppearance.gender ? 'selected' : ''}>${ts(o.name)}</option>`).join('')}</select></label><label><span>${ts('hairstyle')}</span><select data-appearance="hair">${APPEARANCE_OPTIONS.hair.map((o) => `<option value="${o.key}" ${o.key === myAppearance.hair ? 'selected' : ''}>${ts(o.name)}</option>`).join('')}</select></label><div class="tone-control"><span>${ts('skin tone')}</span><div class="tone-options">${APPEARANCE_OPTIONS.tones.map((color, i) => `<button type="button" data-tone="${i}" class="tone${i === myAppearance.tone ? ' on' : ''}" style="--tone:${color}" aria-label="${t`skin tone ${i + 1}`}" aria-pressed="${i === myAppearance.tone}"></button>`).join('')}</div></div><small>${ts('outfit colors are assigned by the room')}</small>${ctx.skin() === 'classic' ? `<small>${ts('detailed appearance is visible in SUNLIT TOON')}</small>` : ''}</div></div></details>`;
+}
+function renderAppearancePreview() {
+  const img = hud.el.panel.querySelector('#avatarPreview'); if (!img || !appearanceOpen) return;
+  if (!appearancePreview) {
+    const canvas = document.createElement('canvas'), renderer = new InkRenderer(canvas, { width: 200, height: 230, pixelRatio: 1 });
+    renderer.camera.fov = 35; renderer.camera.position.set(2.1, 1.65, 3.8); renderer.camera.lookAt(0, 1.0, 0); renderer.camera.updateProjectionMatrix();
+    appearancePreview = { canvas, renderer, model: null, materials: [], key: '' };
+  }
+  const p = appearancePreview, ink = net.connected ? player.ink ?? INK.BLUE : INK.BLUE;
+  const key = JSON.stringify(myAppearance) + ':' + ink;
+  if (p.key !== key) {
+    if (p.model) { p.renderer.scene.remove(p.model.root); disposeModelGeometry(p.model.root); for (const m of p.materials) m.dispose(); }
+    const mat = makeInkMaterial({ ink, surface: 'cloth' }), solid = makeInkMaterial({ ink: INK.BLACK, fill: true }); p.materials = [mat, solid];
+    p.model = buildHumanoid(mat, solid, { skin: 'toon', appearance: myAppearance, scale: 1, weapon: 'rifle', build: { bodyW: 1, headS: 1, limbR: 0.033 } });
+    disposeModelGeometry(p.model.J.gun); p.model.J.gun.clear(); p.model.root.rotation.y = -0.2;
+    p.renderer.scene.add(p.model.root); p.key = key;
+  }
+  // A second renderer shares material uniforms; restore the match renderer immediately afterwards.
+  try { p.renderer.setSkin('toon'); p.renderer.render(0); img.src = p.canvas.toDataURL('image/png'); }
+  finally { R.setSkin(ctx.skin()); }
+}
+function publishAppearance(value) {
+  myAppearance = appearanceOf(value); localStorage.setItem('doodle_appearance', JSON.stringify(myAppearance));
+  net._meta = { ...net._meta, name: myName, appearance: myAppearance };
+  if (net.connected) {
+    if (net.isHost) { const p = lobby.players.get(net.id); if (p) p.appearance = myAppearance; broadcastLobby(); }
+    else net.send('appearance', myAppearance);
+  }
+  applySkin(); showStart();
+}
+function wireAppearance() {
+  const box = hud.el.panel.querySelector('#avatarEditor'); if (!box) return;
+  box.addEventListener('click', (e) => {
+    e.stopPropagation(); const b = e.target.closest('[data-tone]'); if (b) publishAppearance({ ...myAppearance, tone: Number(b.dataset.tone) });
+  });
+  box.addEventListener('change', (e) => { const key = e.target.dataset.appearance; if (key === 'gender' || key === 'hair') publishAppearance({ ...myAppearance, [key]: e.target.value }); });
+  box.addEventListener('toggle', () => { if (!box.isConnected) return; appearanceOpen = box.open; if (box.open) renderAppearancePreview(); });
+  renderAppearancePreview();
+}
 function mainHTML() {
-  return `<h1>DOODLE DISTRICT</h1><h2>a scribbled survival shooter</h2>
+  return `<h1>DOODLE DISTRICT</h1><h2>${ts(ctx.skin() === 'toon' ? 'a sunlit cartoon combat playground' : 'a scribbled survival shooter')}</h2>
+    ${skinHTML(ctx.skin(), true)}
+    ${appearanceHTML()}
     <div class="mainbtns"><button type="button" class="start" id="soloBtn">START<i>solo · survive the waves</i></button><button type="button" id="onlineBtn">PLAY ONLINE<i>free for all or squad survival · up to 10 players</i></button></div>
     ${mapHTML(mapKey, true)}${touchMode ? TOUCH_CONTROLS_HTML : CONTROLS_HTML}${settingsHTML()}${checkpointHTML()}${best ? `<div class="beststat">${t`best score: ${best}`}</div>` : ''}`;
 }
@@ -1088,6 +1171,8 @@ function lobbyHTML() {
   return `<h1>LOBBY</h1><h2>${t`${blurb} · ${n}/${net.maxPlayers} players`}</h2>
     <div class="online" id="online">
       <div class="row"><span>code</span><span class="code">${String(net.isHost ? (net.aliasCode || net.code) : (lobby.shown || net.code) || '').replace(/-\d+$/, '')}</span></div>
+      ${skinHTML(ctx.skin(), host, true)}
+      ${appearanceHTML()}
       ${modeHTML(lobby.gameMode, host)}
       ${weaponModeHTML(ctx.weaponMode(), host)}
       ${mapHTML(playable(lobby.map || mapKey, !isCoop), host, !isCoop)}
@@ -1140,6 +1225,7 @@ function showStart() {
   if (game.state === 'lobby') screen = 'lobby';
   const html = screen === 'lobby' ? lobbyHTML() : screen === 'online' ? onlineHTML() : mainHTML();
   hud.showScreen(html);
+  wireSkin(); wireAppearance();
   const p = hud.el.panel;
   if (screen === 'main') {
     wireSettings(); wireCheckpoints((w) => beginAtWave(w)); wireMap((k) => { mapKey = k; localStorage.setItem('doodle_map', k); showStart(); });
@@ -1193,7 +1279,7 @@ function hostStart() {
   // deal everyone a different spot, shuffled so the same people do not always start together
   setArena(mode === 'ffa'); const order = spawnSpots().map((_, i) => i); for (let i = order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [order[i], order[j]] = [order[j], order[i]]; }
   const spawns = {}; [...lobby.players.keys()].forEach((id, i) => { spawns[id] = order[i % order.length]; });
-  net.send('start', { spawns, players: lobbyRows(), colors: reservedColors(), map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode() }); startMatch(false, spawns[net.id], mode); sendScores();
+  net.send('start', { spawns, players: lobbyRows(), colors: reservedColors(), map: lobby.map || mapKey, mode, bal: !!lobby.ballistics, diff: ctx.difficulty(), mob: lobby.mob, weaponMode: ctx.weaponMode(), skin: ctx.skin() }); startMatch(false, spawns[net.id], mode); sendScores();
   if (mode === 'coop') startWave(1);
 }
 function startMatch(late, spawnIdx, mode = 'ffa') {
@@ -1217,7 +1303,7 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
 }
 function pause() { if ((game.state !== 'play' && !(game.state === 'dying' && online())) || game.menu) return; if (!online()) game.state = 'pause'; game.menu = true; showPause(); audio.reelLoop(false); }
 function resume() { if (online()) { game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad && !touchMode) input.requestLock(); return; } begin(); }
-Object.assign(window.__game, { startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
+Object.assign(window.__game, { startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, applySkin, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
 hud.onScreenClick = () => {
   // the config sits on top of whatever screen opened it, so anything that would have dismissed that
   // screen dismisses the config first - backdrop, space bar, escape

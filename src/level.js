@@ -14,13 +14,18 @@ export const LEVELS = [{ key: 'district', name: 'DOODLE DISTRICT', blurb: 'stree
 
 function createBuilder(scene, world) {
   const geos = {}; const L = { rings: [], spawns: [], snipers: [], pickups: [], animated: [], meshes: [], playerStart: new THREE.Vector3(0, 0, 42), bounds: { minX: -55, maxX: 55, minZ: -55, maxZ: 55 }, arenaSpawns: [], grappleMovers: [], breakables: [], key: 'district' };
-  const addGeo = (g, ink) => (geos[ink] || (geos[ink] = [])).push(g);
+  // Keep semantic surfaces separate when merging; the classic shader still uses only the ink.
+  const addGeo = (g, ink, surface = 'ink', classicOnly = false) => {
+    const key = `${ink}:${surface}:${classicOnly}`;
+    (geos[key] || (geos[key] = { ink, surface, classicOnly, items: [] })).items.push(g);
+  };
   const collider = (x, y, z, w, h, d, o = {}) => world.addBox({ x: x - w / 2, y, z: z - d / 2 }, { x: x + w / 2, y: y + h, z: z + d / 2 }, { noNav: !!o.noNav, noShoot: !!o.noShoot, noGrapple: !!o.noGrapple, tag: o.tag });
   function box(x, y, z, w, h, d, o = {}) {
-    const g = new THREE.BoxGeometry(w, h, d); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE);
+    const surface = o.surface || (o.ink === INK.BLACK || (Math.min(w, d) < 0.3 && h > 1) ? 'metal' : h <= 1 && w > 3 && d > 3 ? 'ground' : 'plaster');
+    const g = new THREE.BoxGeometry(w, h, d); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE, surface, !!o.classicOnly);
     if (!o.noCollide) collider(x, y, z, w, h, d, o);
   }
-  const slab = (x1, z1, x2, z2, y, t, o = {}) => box((x1 + x2) / 2, y - t, (z1 + z2) / 2, x2 - x1, t, z2 - z1, o); // top surface at y
+  const slab = (x1, z1, x2, z2, y, t, o = {}) => box((x1 + x2) / 2, y - t, (z1 + z2) / 2, x2 - x1, t, z2 - z1, { surface: 'stone', ...o }); // top surface at y
   // Wall pieces along an axis with rectangular gaps [a1, a2, yBottom = 0, yTop = h]; gaps may overlap.
   function wallPieces(a1, a2, h, gaps) {
     const xs = new Set([a1, a2]);
@@ -50,7 +55,7 @@ function createBuilder(scene, world) {
     const dx = dir === '+x' ? 1 : dir === '-x' ? -1 : 0, dz = dir === '+z' ? 1 : dir === '-z' ? -1 : 0;
     for (let i = 0; i < steps; i++) {
       const c = (i + 0.5) * run, h = (i + 1) * rise; const cx = x + dx * c, cz = z + dz * c;
-      box(cx, y, cz, dx ? run + 0.004 : width, h, dz ? run + 0.004 : width, o);
+      box(cx, y, cz, dx ? run + 0.004 : width, h, dz ? run + 0.004 : width, { surface: 'stone', ...o });
     }
     return { x: x + dx * steps * run, z: z + dz * steps * run, y: y + steps * rise };
   }
@@ -58,16 +63,16 @@ function createBuilder(scene, world) {
   function rail(x1, z1, x2, z2, y, o = {}) {
     const len = Math.hypot(x2 - x1, z2 - z1); const ax = Math.abs(x2 - x1) > Math.abs(z2 - z1);
     const cx = (x1 + x2) / 2, cz = (z1 + z2) / 2;
-    box(cx, y + 0.9, cz, ax ? len : 0.12, 0.12, ax ? 0.12 : len, { noCollide: true, ink: o.ink });
+    box(cx, y + 0.9, cz, ax ? len : 0.12, 0.12, ax ? 0.12 : len, { noCollide: true, ink: o.ink, surface: 'metal' });
     const n = Math.max(1, Math.round(len / 2));
-    for (let i = 0; i <= n; i++) { const t = i / n; box(x1 + (x2 - x1) * t, y, z1 + (z2 - z1) * t, 0.1, 0.9, 0.1, { noCollide: true, ink: o.ink }); }
+    for (let i = 0; i <= n; i++) { const t = i / n; box(x1 + (x2 - x1) * t, y, z1 + (z2 - z1) * t, 0.1, 0.9, 0.1, { noCollide: true, ink: o.ink, surface: 'metal' }); }
     collider(cx, y, cz, ax ? len : 0.12, 1.0, ax ? 0.12 : len, { noNav: true, noShoot: true });
   }
   function cyl(x, y, z, r, h, o = {}) {
-    const g = new THREE.CylinderGeometry(r, r, h, o.seg ?? 12); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE);
+    const g = new THREE.CylinderGeometry(r, r, h, o.seg ?? 12); g.translate(x, y + h / 2, z); addGeo(g, o.ink ?? INK.BLUE, o.surface || 'metal');
     if (!o.noCollide) collider(x, y, z, r * 1.6, h, r * 1.6, o);
   }
-  function sphere(x, y, z, r, o = {}) { const g = new THREE.SphereGeometry(r, o.seg ?? 10, o.seg ?? 8); g.translate(x, y, z); addGeo(g, o.ink ?? INK.BLUE); }
+  function sphere(x, y, z, r, o = {}) { const g = new THREE.SphereGeometry(r, o.seg ?? 10, o.seg ?? 8); g.translate(x, y, z); addGeo(g, o.ink ?? INK.BLUE, o.surface || (o.ink === INK.GREEN ? 'foliage' : 'ink'), !!o.classicOnly); }
   function ring(x, y, z, axis = 'z') {
     const g = new THREE.TorusGeometry(0.6, 0.1, 8, 20);
     if (axis === 'x') g.rotateY(Math.PI / 2); else if (axis === 'y') g.rotateX(Math.PI / 2);
@@ -79,9 +84,10 @@ function createBuilder(scene, world) {
   const pickup = (x, y, z) => L.pickups.push(new THREE.Vector3(x, y, z));
   // ---------------- shared finish ----------------
   function finish() {
-    for (const ink in geos) {
-      const merged = mergeGeometries(geos[ink], false);
-      const mesh = new THREE.Mesh(merged, makeInkMaterial({ ink: Number(ink) }));
+    for (const { ink, surface, classicOnly, items } of Object.values(geos)) {
+      const merged = mergeGeometries(items, false);
+      const mesh = new THREE.Mesh(merged, makeInkMaterial({ ink, surface }));
+      if (classicOnly) mesh.userData.skin = 'classic';
       mesh.matrixAutoUpdate = false; scene.add(mesh); L.meshes.push(mesh);
     }
     world.finalize();
@@ -116,8 +122,8 @@ function buildDistrict(B, arena = false) {
     collider(0, PH, -P, 2 * P + T, 40, T, NG); collider(0, PH, P, 2 * P + T, 40, T, NG); collider(-P, PH, 0, T, 40, 2 * P + T, NG); collider(P, PH, 0, T, 40, 2 * P + T, NG);
     collider(0, 56, 0, 2 * P + 40, 8, 2 * P + 40, NG);
     const R = 96, C = -22;
-    for (let k = 0; k < 6; k++) { const g = new THREE.TorusGeometry(R, 0.5, 5, 80, Math.PI); g.rotateY(k * Math.PI / 6); g.translate(0, C, 0); addGeo(g, INK.BLUE); }
-    for (const h of [30, 46, 60, 70]) { const r = Math.sqrt(R * R - (h - C) * (h - C)); const g = new THREE.TorusGeometry(r, 0.4, 5, 96); g.rotateX(Math.PI / 2); g.translate(0, h, 0); addGeo(g, INK.BLUE); }
+    for (let k = 0; k < 6; k++) { const g = new THREE.TorusGeometry(R, 0.5, 5, 80, Math.PI); g.rotateY(k * Math.PI / 6); g.translate(0, C, 0); addGeo(g, INK.BLUE, 'ink', true); }
+    for (const h of [30, 46, 60, 70]) { const r = Math.sqrt(R * R - (h - C) * (h - C)); const g = new THREE.TorusGeometry(r, 0.4, 5, 96); g.rotateX(Math.PI / 2); g.translate(0, h, 0); addGeo(g, INK.BLUE, 'ink', true); }
   }
   // ledges / balconies on the perimeter (grapple + stand)
   const ledges = [[-30, -E, 8, 1.6], [30, -E, 8, 1.6], [-E, 40, 1.6, 8], [E, -10, 1.6, 8], [-E, -30, 1.6, 6], [E, 35, 1.6, 6], [10, E, 8, 1.6], [-40, E, 6, 1.6]];
@@ -137,9 +143,9 @@ function buildDistrict(B, arena = false) {
     for (const [x, z] of [[-56, 30], [56, -30], [30, -56], [-30, 56]]) { box(x, 0, z, 0.3, 7, 0.3, { noNav: true }); box(x, 7, z, 1.4, 0.3, 0.3, { noCollide: true }); addGeo(new THREE.SphereGeometry(0.45, 8, 6).translate(x + 0.7, 6.8, z), INK.ORANGE); }
     // the dome: ribs to look at, plus an invisible shell of bands that stops you and shrugs off the hook
     const R = 120, C = -30; const domeY = (x, z) => Math.sqrt(Math.max(1, R * R - x * x - z * z)) + C;
-    for (let k = 0; k < 8; k++) { const g = new THREE.TorusGeometry(R, 0.6, 5, 96, Math.PI); g.rotateY(k * Math.PI / 8); g.translate(0, C, 0); addGeo(g, INK.BLUE); }
-    for (const h of [38, 54, 68, 80, 88]) { const r = Math.sqrt(R * R - (h - C) * (h - C)); const g = new THREE.TorusGeometry(r, 0.5, 5, 128); g.rotateX(Math.PI / 2); g.translate(0, h, 0); addGeo(g, INK.BLUE); }
-    addGeo(new THREE.SphereGeometry(2.4, 10, 8).translate(0, R + C, 0), INK.RED);
+    for (let k = 0; k < 8; k++) { const g = new THREE.TorusGeometry(R, 0.6, 5, 96, Math.PI); g.rotateY(k * Math.PI / 8); g.translate(0, C, 0); addGeo(g, INK.BLUE, 'ink', true); }
+    for (const h of [38, 54, 68, 80, 88]) { const r = Math.sqrt(R * R - (h - C) * (h - C)); const g = new THREE.TorusGeometry(r, 0.5, 5, 128); g.rotateX(Math.PI / 2); g.translate(0, h, 0); addGeo(g, INK.BLUE, 'ink', true); }
+    addGeo(new THREE.SphereGeometry(2.4, 10, 8).translate(0, R + C, 0), INK.RED, 'ink', true);
     const NG = { noNav: true, noGrapple: true };
     collider(0, 88, 0, 300, 10, 300, NG);
     for (let y0 = PH; y0 < 88; y0 += 4) { const inner = Math.sqrt(Math.max(0, R * R - (y0 + 4 - C) ** 2)); if (inner > P + T) continue; const o = inner + 80; collider(0, y0, -o, 320, 4, 160, NG); collider(0, y0, o, 320, 4, 160, NG); collider(-o, y0, 0, 160, 4, 320, NG); collider(o, y0, 0, 160, 4, 320, NG); }
@@ -303,10 +309,10 @@ function buildDistrict(B, arena = false) {
 
   // ---------------- sky doodles ----------------
   {
-    sphere(-90, 110, -160, 12, { seg: 12 });
-    for (let i = 0; i < 12; i++) { const a = (i / 12) * Math.PI * 2; const g = new THREE.BoxGeometry(6, 0.7, 0.7); g.rotateZ(a); g.translate(-90 + Math.cos(a) * 19, 110 + Math.sin(a) * 19, -160); addGeo(g, INK.BLUE); }
+    sphere(-90, 110, -160, 12, { seg: 12, classicOnly: true });
+    for (let i = 0; i < 12; i++) { const a = (i / 12) * Math.PI * 2; const g = new THREE.BoxGeometry(6, 0.7, 0.7); g.rotateZ(a); g.translate(-90 + Math.cos(a) * 19, 110 + Math.sin(a) * 19, -160); addGeo(g, INK.BLUE, 'ink', true); }
     for (const [cx, cy, cz, s] of [[60, 70, -170, 1], [-20, 75, -190, 1.3], [140, 60, -80, 0.9], [-150, 65, 40, 1.1], [30, 80, 180, 1.2], [-90, 60, 170, 0.8]]) {
-      for (let i = 0; i < 6; i++) sphere(cx + (i - 2.5) * 5 * s, cy + Math.sin(i * 1.7) * 2.5 * s, cz, (4 + (i % 3)) * s, { seg: 10 });
+      for (let i = 0; i < 6; i++) sphere(cx + (i - 2.5) * 5 * s, cy + Math.sin(i * 1.7) * 2.5 * s, cz, (4 + (i % 3)) * s, { seg: 10, classicOnly: true });
     }
   }
 
