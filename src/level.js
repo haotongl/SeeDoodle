@@ -114,7 +114,8 @@ function createBuilder(scene, world) {
 }
 
 // ============================ map 1: Doodle District ============================
-function buildDistrict(B, arena = false) {
+function buildDistrict(B, arena = false, team = false) {
+  arena = arena || team;
   const { L, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, planes, addGeo, collider } = B;
   // ---------------- ground + perimeter ----------------
   // solo keeps the tight old block; a match gets a far wider arena, a dome and a hanging playground
@@ -325,6 +326,51 @@ function buildDistrict(B, arena = false) {
 
   L.teamSpawns = [[-40, 0, 18], [-34, 12, 12], [-48, 7, -30], [-52, 0, 30], [-30, 7, -48]].map(([x, y, z]) => new THREE.Vector3(x, y, z));
   L.teamSpawns = [L.teamSpawns, [[40, 0, 8], [34, 12, 18], [48, 7, -30], [52, 0, 30], [16, 7, -45]].map(([x, y, z]) => new THREE.Vector3(x, y, z))];
+  if (team) {
+    L.teamSpawns = [-1, 1].map(side => [54, 59].flatMap(x => [33, 37, 41, 45].map(z => new THREE.Vector3(side * x, 0.03, z))));
+    L.teamFacing = [-Math.PI / 2, Math.PI / 2];
+    L.playerStart.copy(L.teamSpawns[0][0]);
+    // Covered bases open through two rear corners; staggered screens protect the exits.
+    for (const side of [-1, 1]) {
+      const ink = side < 0 ? INK.BLUE : INK.ORANGE;
+      box(side * 49.5, 0, 39, 0.6, 4.2, 22, { ink, surface: 'stone' });
+      box(side * 63.5, 0, 39, 0.6, 4.2, 22, { surface: 'stone' });
+      box(side * 56.5, 4.2, 39, 14.6, 0.35, 22.6, { ink, surface: 'metal', noNav: true });
+      for (const z of [28, 50]) box(side * 54.3, 0, z, 9, 4.2, 0.6, { surface: 'stone' });
+      for (const z of [24, 54]) box(side * 62, 0, z, 5.4, 3.2, 0.6, { ink, surface: 'stone' });
+      for (const z of [31, 47]) box(side * 56.4, 0.013, z, 11.4, 0.022, 0.14, { noCollide: true, ink });
+    }
+    // Both objectives stay on the street so every loadout and bot can reach the C4.
+    L.bombSites = [{ id: 'A', pos: new THREE.Vector3(0, 0.08, -12), radius: 3 }, { id: 'B', pos: new THREE.Vector3(0, 0.08, 40), radius: 3 }];
+    const paint = { noCollide: true, ink: INK.ORANGE, surface: 'ink' };
+    const stroke = (x1, z1, x2, z2) => {
+      const g = new THREE.BoxGeometry(Math.hypot(x2 - x1, z2 - z1), 0.022, 0.14);
+      g.rotateY(-Math.atan2(z2 - z1, x2 - x1));
+      g.translate((x1 + x2) / 2, 0.025, (z1 + z2) / 2);
+      addGeo(g, INK.ORANGE, 'ink');
+    };
+    for (const site of L.bombSites) {
+      const z = site.pos.z;
+      for (const d of [-3.2, 3.2]) {
+        box(0, 0.013, z + d, 6.54, 0.022, 0.14, paint);
+        box(d, 0.013, z, 0.14, 0.022, 6.26, paint);
+      }
+      if (site.id === 'A') {
+        stroke(-0.8, z + 1, 0, z - 1); stroke(0, z - 1, 0.8, z + 1); stroke(-0.45, z + 0.15, 0.45, z + 0.15);
+      } else {
+        stroke(-0.65, z - 1, -0.65, z + 1);
+        for (const dz of [-1, 0, 1]) stroke(-0.65, z + dz, 0.55, z + dz);
+        stroke(0.55, z - 1, 0.8, z - 0.5); stroke(0.8, z - 0.5, 0.55, z);
+        stroke(0.55, z, 0.8, z + 0.5); stroke(0.8, z + 0.5, 0.55, z + 1);
+      }
+      for (const side of [-1, 1]) box(side * 6.5, 0, z, 2.2, 2.3, 4, { ink: INK.BROWN, surface: 'stone' });
+    }
+    box(0, 0, 19, 6, 3.2, 4, { ink: INK.TEAL, surface: 'stone' });
+    L.tactical = {
+      buildings: [[-43, 4, -25, 20], [24, 4, 44, 20], [-37, -50, -23, -40], [-15, -50, -1, -40], [9, -50, 23, -40]].map(([x1, z1, x2, z2]) => ({ x1, z1, x2, z2 })),
+      paths: [[[-52, -34.5], [52, -34.5], [52, -25.5], [-52, -25.5]]],
+    };
+  }
   if (!arena) planes(3, 30, 30, { rStep: 8, hStep: 6, scale: 1.4 });
   return B.finish();
 }
@@ -332,19 +378,20 @@ function buildDistrict(B, arena = false) {
 // ============================ map 3: The Undercity ============================
 // A compact PVP maze: service tunnels below a shop-lined ground floor, with short roof
 // catwalks above. Every room has two exits and a small visual marker to keep orientation clear.
-function buildUndercity(B, arena = false) {
+function buildUndercity(B, arena = false, team = false) {
   const { L, box, slab, wallX, wallZ, stairs, rail, cyl, sphere, ring, spawn, sniper, pickup, collider, addGeo } = B;
   const BL = INK.BLUE, BK = INK.BLACK, OR = INK.ORANGE, RD = INK.RED;
   const P = 45; L.key = 'undercity'; L.playerStart.set(0, 0.2, 34);
   L.bounds = { minX: -P, maxX: P, minZ: -P, maxZ: P };
+  if (team) L.bounds.minY = -12;
 
   // Floors are deliberately broken into plates, leaving a central hatch and two side shafts. The
   // shafts are not decoration: the north and south stairs climb out of the tunnels through them,
-  // and each one opens exactly where a climber's head would otherwise meet the underside of the
-  // ground floor, so the hole is the last two metres of the flight and nothing more.
+  // with enough headroom beneath the ground floor. Team play widens the openings for its
+  // shallower flights and the full body clearance used by navigation.
   slab(-44, -44, -4, 44, 0.15, 0.3); slab(4, -44, 44, 44, 0.15, 0.3);
-  slab(-4, -44, 4, -17.5, 0.15, 0.3); slab(-4, -14.1, 4, -4, 0.15, 0.3);
-  slab(-4, 4, 4, 14.1, 0.15, 0.3); slab(-4, 17.5, 4, 44, 0.15, 0.3);
+  slab(-4, -44, 4, team ? -20.5 : -17.5, 0.15, 0.3); slab(-4, -14.1, 4, -4, 0.15, 0.3);
+  slab(-4, 4, 4, 14.1, 0.15, 0.3); slab(-4, team ? 20.5 : 17.5, 4, 44, 0.15, 0.3);
   slab(-44, -44, 44, 44, -11.5, 0.5, { ink: BL });
   // The enclosing shell is tall enough to keep grapples and players inside all three layers.
   wallX(-P, P, -P, -12, 28, 0.8, [[-7, 7, 0, 3.4]], { ink: BL });
@@ -386,8 +433,22 @@ function buildUndercity(B, arena = false) {
   // Three stair cores and a central floor hatch form multiple vertical routes. Every riser is
   // under the 0.55 m a body can be lifted by (physics.js, _moveHoriz): a taller one looks like a
   // staircase and behaves like a wall, and the route it belongs to quietly stops existing.
-  stairs(-2, -11.5, -25, '+z', 26, 2.2, { rise: 0.45, run: 0.42 });
-  stairs(2, -11.5, 25, '-z', 26, 2.2, { rise: 0.45, run: 0.42 });
+  if (team) {
+    // Shallower, longer flights keep adjacent navigation samples within one safe
+    // step and reach the existing landings without requiring a grapple or roof jump.
+    for (const side of [-1, 1]) {
+      const x = side * 2.5, z = side * 42.28, rise = 11.7 / 47;
+      stairs(x, -11.5, z, side < 0 ? '+z' : '-z', 47, 2.2, { rise, run: 0.6 });
+      // Side panels rule out impossible shortcuts onto the middle of the flight.
+      for (let i = 0; i < 47; i++) for (const edge of [-1, 1])
+        box(x + edge * 1.1, -11.5, z - side * (i + 0.5) * 0.6, 0.12, (i + 1) * rise + 0.9, 0.604, { ink: BK, surface: 'metal', noNav: true });
+      rail(-4, side * 20.5, 4, side * 20.5, 0.15, { ink: BK });
+      for (const edge of [-1, 1]) rail(edge * 4, side * 14.1, edge * 4, side * 20.5, 0.15, { ink: BK });
+    }
+  } else {
+    stairs(-2, -11.5, -25, '+z', 26, 2.2, { rise: 0.45, run: 0.42 });
+    stairs(2, -11.5, 25, '-z', 26, 2.2, { rise: 0.45, run: 0.42 });
+  }
   stairs(-25, 0.15, 2, '+x', 20, 2.2, { rise: 0.448, run: 0.42 });
   stairs(25, 0.15, -2, '-x', 20, 2.2, { rise: 0.448, run: 0.42 });
   // The middle flight stands clear of the hatch lip rather than on it: a stair whose bottom tread
@@ -431,6 +492,37 @@ function buildUndercity(B, arena = false) {
   const arenaPoints = [[-35,-11.4,-35], [0,-11.4,-35], [35,-11.4,-35], [-35,-11.4,10], [35,-11.4,10], [0,-11.4,28], [-30,0.25,-20], [28,0.25,-20], [-28,0.25,25], [30,0.25,27], [-25,9.4,-3.5], [16,9.4,3.5], [-4,9.5,20], [4,9.5,-20], [0,-11.4,0]];
   for (const p of arenaPoints) L.arenaSpawns.push(new THREE.Vector3(...p));
   L.teamSpawns = [arenaPoints.slice(0, 5), arenaPoints.slice(5, 10)].map(a => a.map(p => new THREE.Vector3(...p)));
+  if (team) {
+    L.teamSpawns = [-1, 1].map(side => [-42.2, -40.4].flatMap(x => [-5.4, -1.8, 1.8, 5.4].map(z => new THREE.Vector3(x * -side, 0.2, z))));
+    L.teamFacing = [-Math.PI / 2, Math.PI / 2];
+    L.playerStart.copy(L.teamSpawns[0][0]);
+    for (const side of [-1, 1]) {
+      box(side * 36.5, 0.15, 0, 0.5, 2.5, 8.8, { ink: side < 0 ? BL : OR, surface: 'plaster', noNav: true });
+      for (const z of [-6.8, 6.8]) box(side * 41.3, 0.17, z, 4.4, 0.025, 0.12, { ink: side < 0 ? BL : OR, surface: 'cloth', noCollide: true });
+    }
+    L.bombSites = [{ id: 'A', pos: new THREE.Vector3(0, 0.2, -34), radius: 3 }, { id: 'B', pos: new THREE.Vector3(0, 0.2, 34), radius: 3 }];
+    const mark = { ink: OR, surface: 'cloth', noCollide: true };
+    for (const { id, pos: { x, z } } of L.bombSites) {
+      for (const dx of [-3.15, 3.15]) box(x + dx, 0.17, z, 0.12, 0.025, 6.4, mark);
+      for (const dz of [-3.15, 3.15]) box(x, 0.17, z + dz, 6.2, 0.025, 0.12, mark);
+      if (id === 'A') {
+        for (const side of [-1, 1]) {
+          const g = new THREE.BoxGeometry(0.18, 0.025, 2.2); g.rotateY(side * 0.4); g.translate(x + side * 0.42, 0.21, z); addGeo(g, OR, 'cloth');
+        }
+        box(x, 0.198, z + 0.2, 1.1, 0.025, 0.16, mark);
+      } else {
+        for (const dx of [-0.7, 0.7]) box(x + dx, 0.198, z, 0.16, 0.025, 2.1, mark);
+        for (const dz of [-1, 0, 1]) box(x, 0.198, z + dz, 1.3, 0.025, 0.16, mark);
+      }
+    }
+    // The tactical view represents the ground floor; the invisible sky collider
+    // and underground partitions must not paint over its routes and objectives.
+    L.tactical = {
+      buildings: [[-39, -39, -7, -8], [7, -39, 39, -8], [-39, 8, -7, 39], [7, 8, 39, 39]].map(([x1, z1, x2, z2]) => ({ x1, z1, x2, z2 })),
+      paths: [[[-44, -7], [44, -7], [44, 7], [-44, 7]], [[-6, -44], [6, -44], [6, 44], [-6, 44]]],
+      labels: [{ name: 'NORTH STAIRS', x: 0, z: -16, small: true }, { name: 'SOUTH STAIRS', x: 0, z: 16, small: true }],
+    };
+  }
   return B.finish();
 }
 
@@ -1071,5 +1163,6 @@ function buildZijingang(B) {
 
 export function buildLevel(scene, world, key = 'district', opts = {}) {
   const B = createBuilder(scene, world);
-  return key === 'zijingang' ? buildZijingang(B) : key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, !!opts.arena) : key === 'undercity' ? buildUndercity(B, !!opts.arena) : buildDistrict(B, !!opts.arena);
+  const team = !!opts.team, arena = !!opts.arena || team;
+  return key === 'zijingang' ? buildZijingang(B) : key === 'depot' ? buildDepot(B) : key === 'mexico' ? buildMexico(B, arena) : key === 'undercity' ? buildUndercity(B, arena, team) : buildDistrict(B, arena, team);
 }

@@ -26,12 +26,10 @@ const canvas = document.getElementById('c');
 const R = new InkRenderer(canvas);
 const world = new World();
 const knownMap = (k) => (LEVELS.some((m) => m.key === k) ? k : 'district');
-// A pvp-only map is built for hunting people in the dark: no room for a wave of thirty, and nowhere
-// for them to come from. It is offered in a deathmatch lobby and nowhere else, and this is the one
-// gate that decides it - every path into the level goes through here, so a stale localStorage key or
-// a host who switches to squad survival with it picked both land back on the district.
+// Every offered map supports team play. Survival still excludes maps without wave routes;
+// free-for-all keeps its existing selection, including the compact underground arena.
 const arenaMaps = (ffa) => LEVELS.filter((m) => !m.teamOnly && (ffa || !m.pvpOnly));
-const matchMap = (key, mode) => isTeamMode(mode) ? (LEVELS.some((m) => m.key === key && (m.teamOnly || m.team)) ? key : 'depot') : playable(key, mode === 'ffa');
+const matchMap = (key, mode) => isTeamMode(mode) ? (LEVELS.some((m) => m.key === key) ? key : 'depot') : playable(key, mode === 'ffa');
 const playable = (k, ffa) => (arenaMaps(ffa).some((m) => m.key === k) ? k : 'district');
 let mapKey = playable(localStorage.getItem('doodle_map') || 'district', false);
 let skinKey = skinOf(localStorage.getItem('doodle_skin')).key;
@@ -41,21 +39,22 @@ let appearanceOpen = false, appearancePreview = null;
 let level = buildLevel(R.scene, world, mapKey, { arena: false });
 R.setLevelGeometry?.(level);
 let nav = new NavGrid(world, level.bounds, level.navCell || 1).build();
-let loadedKey = mapKey, arenaLoaded = false;
+let loadedKey = mapKey, arenaLoaded = false, teamLoaded = false;
 audio.setTune(mapKey === 'mexico' ? 'mexico' : 'district');
 // the map in play: solo uses the picked map, a match uses the host's choice; a rebuild wipes broken props
-function setLevel(key, on, force = false) {
-  if (!force && key === loadedKey && on === arenaLoaded) return; loadedKey = key; arenaLoaded = on;
+function setLevel(key, on, force = false, team = false) {
+  // Switching FFA and team modes on the same map must rebuild bases and objective cover.
+  if (!force && key === loadedKey && on === arenaLoaded && team === teamLoaded) return; loadedKey = key; arenaLoaded = on; teamLoaded = team;
   for (const m of level.meshes) { R.scene.remove(m); if (m.geometry) m.geometry.dispose(); if (m.traverse) m.traverse((o) => { if (o !== m && o.geometry) o.geometry.dispose(); }); }
   level.animated.length = 0; world.clear();
-  level = buildLevel(R.scene, world, key, { arena: on }); nav = new NavGrid(world, level.bounds, level.navCell || 1).build();
+  level = buildLevel(R.scene, world, key, { arena: on, team }); nav = new NavGrid(world, level.bounds, level.navCell || 1).build();
   ctx.level = level; ctx.nav = nav; if (window.__game) { window.__game.level = level; window.__game.nav = nav; }
   R.setMap?.(key);
   R.setLevelGeometry?.(level);
   for (const m of level.meshes) if (m.userData.skin) m.visible = m.userData.skin === ctx.skin();
   audio.setTune(key === 'mexico' ? 'mexico' : 'district');
 }
-const setArena = (on) => setLevel(net.active ? matchMap(lobby.map || mapKey, lobby.gameMode) : playable(mapKey, on), on);
+const setArena = (on) => setLevel(net.active ? matchMap(lobby.map || mapKey, lobby.gameMode) : playable(mapKey, on), on, false, !!(on && net.active && isTeamMode(lobby.gameMode)));
 const input = new Input(canvas);
 const hud = new HUD(document.getElementById('hud'));
 input.onWheel = (event) => hud.scrollBoard(event);
@@ -1179,7 +1178,7 @@ function checkpointHTML() {
 function wireCheckpoints(onGo) { const box = hud.el.panel.querySelector('.checkpoints'); if (!box) return; box.addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('button'); if (b) onGo(Number(b.dataset.cp)); }); }
 const mapName = (k) => (LEVELS.find((m) => m.key === k) || LEVELS[0]).name;
 function mapHTML(sel, canPick, ffa = false, team = false) {
-  const list = team ? LEVELS.filter((m) => m.teamOnly || m.team) : arenaMaps(ffa); if (list.length < 2) return '';
+  const list = team ? LEVELS : arenaMaps(ffa); if (list.length < 2) return '';
   const reference = sel === 'zijingang' ? `<div class="map-note">${ts('Campus-inspired layout - 240 x 180 m - 8x Depot area')}<br>${ts('Map reference')}: <a href="https://map.zju.edu.cn/" target="_blank" rel="noopener">${ts('Campus map')}</a> · &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div>` : '';
   return `<div class="mapsel" id="mapsel"><span>${ts('map')}</span>${list.map((m) => `<button type="button" class="mapbtn${m.key === sel ? ' on' : ''}" data-map="${m.key}" ${canPick ? '' : 'disabled'}>${ts(m.name)}<i>${ts(m.blurb)}</i></button>`).join('')}</div>${reference}`;
 }
@@ -1386,7 +1385,7 @@ function toLobbyScreen() { match.clear(); net.inMatch = false; for (const r of r
 
 // ---------------- run control ----------------
 function resetGame() {
-  if (level.breakables.some((b) => !b.alive)) setLevel(loadedKey, arenaLoaded, true);
+  if (level.breakables.some((b) => !b.alive)) setLevel(loadedKey, arenaLoaded, true, teamLoaded);
   enemies.clear(); effects.clear(); bullets.clear(); for (const p of pickups) R.scene.remove(p.mesh); pickups.length = 0; ammoClock = 0; healthClock = 20;
   // whoever hosts next owns its own enemies again; startMatch turns mirroring back on if it has to
   enemies.mirror = false; enemies.nextId = 1; snapT = 0; coopScoreT = 0; coopSyncT = 0; coopLeft = 0;

@@ -66,6 +66,8 @@ const DICT = {
     'EAST CAMPUS ROAD': '东侧校园路',
     'LAKESIDE GARDEN': '湖滨花园',
     'SOUTH PLAZA': '南侧广场',
+    'NORTH STAIRS': '北侧楼梯',
+    'SOUTH STAIRS': '南侧楼梯',
     'opposite bases, twin courtyards and covered routes': '对向基地、双侧庭院与掩护路线',
     'streets, rooftops and fire escapes': '街道、屋顶和消防梯',
     'flooded tunnels, shuttered shops and metro echoes': '积水隧道、卷帘店铺和地铁回声',

@@ -78,8 +78,16 @@ an ongoing defuse and assign a replacement by walkable route if the current defu
 ### Maps
 
 **DOODLE DISTRICT** is the original: streets, rooftops and fire escapes, and it is where the waves
-come from. **THE UNDERCITY** is deathmatch-only — it does not appear in the map list for a squad
+come from. **THE UNDERCITY** is versus-only — it does not appear in the map list for a squad
 run, because it has no sky for flyers and no long approach for a wave to walk down.
+
+Every map in the selection supports both Team Deathmatch and Demolition: Doodle District,
+The Undercity, Sunline Depot and Zijingang East. The host can switch between these modes while
+keeping the selected map. Each has opposing team bases and A/B bomb sites. District and Undercity
+use dedicated team layouts with grouped spawn slots and sheltered exits; switching back to
+free-for-all restores their original layouts. Bots and the same weapon restrictions work on every
+team map. The Undercity team layout includes longer, guarded stairs and underground navigation,
+so bots can return from the service tunnels and recover a dropped C4 there.
 
 The undercity is three floors stacked in a 90 m box: flooded tunnels at −11.5, shuttered shops at
 ground level, and a gantry ring at +9.5, joined by six stairwells and a central hatch. The floor
