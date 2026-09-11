@@ -37,6 +37,7 @@ export class Player {
     this.weaponIndex = 0; this.weapon = this.weapons[0]; this.weapon.equip(); this.returnT = 0; this.prevWeaponIndex = 0;
     this.recoilPitch = new Spring(190, 17); this.recoilYaw = new Spring(190, 17); this.fovKick = new Spring(220, 14); this.landDip = new Spring(170, 15);
     this.roll = 0; this.fov = this.opt.fov; this.bobPhase = 0; this.bobAmt = 0; this.stepDist = 0; this.eyeH = EYE_STAND;
+    this._stepOffset = 0; this._cameraBlockers = [];
     this.crouching = false; this.sliding = false; this.slideT = 0; this.coyote = 0; this.jumpBuffer = 0; this.wallTouch = 9; this.wallN = new THREE.Vector3(); this.wallJumpCd = 0; this.mantleCd = 0;
     this.dashCd = 0; this.airJumps = 1; this.blockCd = 0; this.landGraceT = 0; this.sprintToggle = false; this.lastGround = true; this.airT = 0; this._sprinting = false; this._aiming = false; this._mv = { x: 0, y: 0 };
     this.grapple = { state: 'idle', anchor: new THREE.Vector3(), hook: new THREE.Vector3(), from: new THREE.Vector3(), flyT: 0, flyDur: 0, len: 0, cd: 0, enemy: null, mover: null, blockedT: 0, t: 0, swingT: 0, hopT: 0 };
@@ -55,7 +56,7 @@ export class Player {
   reset(pos, keepGrenades = false) {
     this.cancelGrenade(); this.cancelKnife();
     this.nadeCharge = 0; this._nadeHeld = false; if (this._arc) this.updateNadeArc(-1); this.grapStam = 1; this.blockHeld = 0;
-    const b = this.body; b.pos.copy(pos); b.vel.set(0, 0, 0); b.onGround = false; b.height = STAND_H;
+    const b = this.body; b.pos.copy(pos); b.vel.set(0, 0, 0); b.onGround = false; b.height = STAND_H; this._stepOffset = 0;
     this.recoilAcc.p = 0; this.recoilAcc.y = 0; this.recoilRecT = 0; this.sprintFireLock = 0;
     this.hp = this.maxHp; this.alive = true; this.yaw = 0; this.pitch = 0; this.roll = 0; this.hurtFx = 0; this.flashFx = 0; this.crouching = false; this.sliding = false; this.deathT = 0; this.lastDamageT = 10; this.dashCd = 0; this.airJumps = 1; this.gravityScale = 1; this.dashLock = false;
     this.detachGrapple(false);
@@ -193,6 +194,7 @@ export class Player {
   }
   die() { this.cancelGrenade(); this.cancelKnife(); this.alive = false; this.deathT = 0; audio.death(); this.detachGrapple(false); this.ctx.game.onPlayerDeath(); }
   idleCam(t) {
+    this._stepOffset = 0;
     const c = this.camera, preview = this.ctx.level.previewCam;
     if (preview) { const [x, y, z] = preview.target, a = t * (preview.speed || .025); c.position.set(x + Math.sin(a) * preview.radius, preview.height, z + Math.cos(a) * preview.radius); c.lookAt(x, y, z); }
     else { c.position.set(Math.sin(t * 0.08) * 70, 30 + Math.sin(t * 0.23) * 4, Math.cos(t * 0.08) * 70); c.lookAt(0, 10, 0); }
@@ -310,12 +312,19 @@ export class Player {
     if (!b.onGround && this.mantleCd <= 0 && mv.y > 0.3 && b.vel.y < 8 && this.grapple.state !== 'on') this._tryMantle(_fwd);
     b.noSnap = this.grapple.state === 'on' || b.vel.y > 0.5;
     const spd = b.vel.length(); if (spd > 48) b.vel.multiplyScalar(48 / spd);
+    const groundBeforeMove = b.onGround, yBeforeMove = b.pos.y;
     ctx.world.moveBody(b, dt);
+    // Collision treads must stay discrete, but their step-up/snap-down must not jerk the view.
+    // Only smooth continuous grounded travel: jumps, falls and external teleports stay immediate.
+    if (groundBeforeMove && b.onGround && !b.noSnap) {
+      const step = b.pos.y - yBeforeMove;
+      if (Math.abs(step) <= b.stepHeight + 1e-3) this._stepOffset = clamp(this._stepOffset - step, -b.stepHeight, b.stepHeight);
+    }
     const bounds = ctx.level.bounds;
     if (b.pos.y < (ctx.level.fallY ?? -12) || b.pos.x < bounds.minX - 8 || b.pos.x > bounds.maxX + 8 || b.pos.z < bounds.minZ - 8 || b.pos.z > bounds.maxZ + 8) {
       // Team deaths must resolve at the fall, before the survival-mode rescue relocates C4.
       this.detachGrapple(false); if (this.onFall?.() === true) return;
-      b.pos.copy(ctx.level.playerStart); b.vel.set(0, 0, 0); this.takeDamage(20, null);
+      b.pos.copy(ctx.level.playerStart); b.vel.set(0, 0, 0); this._stepOffset = 0; this.takeDamage(20, null);
       ctx.hud.message('OFF THE PAGE', 'redrawn at the start', 1.8);
     }
     if (b.onGround && !this.lastGround) {
@@ -833,7 +842,16 @@ export class Player {
     const sh = this.ctx.effects.shakeAmt; this.ctx.effects.shakeAmt = damp(sh, 0, 7, dt); const shk = Math.min(sh, 1.2) * this.opt.shake / 100;
     const bobAmt = this.bobAmt * this.opt.bob / 100;
     const bobY = Math.abs(Math.sin(this.bobPhase)) * 0.03 * bobAmt, bobX = Math.cos(this.bobPhase * 0.5) * 0.018 * bobAmt;
-    this.eye.set(b.pos.x, b.pos.y + this.eyeH + this.landDip.value * 0.07 + bobY, b.pos.z);
+    this._stepOffset = damp(this._stepOffset, 0, 14, dt);
+    if (Math.abs(this._stepOffset) < 1e-4) this._stepOffset = 0;
+    let stepOffset = this._stepOffset;
+    if (stepOffset > 0) {
+      // Descending under a low ceiling must not let the smoothed camera peek through it.
+      const eyeY = b.pos.y + this.eyeH;
+      _v2.set(b.pos.x - .06, eyeY, b.pos.z - .06); _v3.set(b.pos.x + .06, eyeY + stepOffset + .04, b.pos.z + .06);
+      for (const box of this.ctx.world.query(_v2, _v3, this._cameraBlockers)) stepOffset = Math.min(stepOffset, Math.max(0, box.min.y - eyeY - .04));
+    }
+    this.eye.set(b.pos.x, b.pos.y + this.eyeH + stepOffset + this.landDip.value * 0.07 + bobY, b.pos.z);
     this.center.set(b.pos.x, b.pos.y + b.height * 0.55, b.pos.z);
     cam.position.copy(this.eye).addScaledVector(this.right, bobX + (Math.random() - 0.5) * shk * 0.07); cam.position.y += (Math.random() - 0.5) * shk * 0.07;
     const aimP = this.pitch + this.recoilPitch.value + (Math.random() - 0.5) * shk * 0.035;

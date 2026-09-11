@@ -12,7 +12,7 @@ import { Effects } from './effects.js';
 import { EnemyManager, BOSSES, buildHumanoid, disposeModelGeometry } from './enemies.js';
 import { Player } from './player.js';
 import { Bullets } from './bullets.js';
-import { RemotePlayer, encodeLocal, PLAYER_INKS, validPlayerColor, playerInk, playerColorCSS } from './players.js';
+import { RemotePlayer, encodeLocal, PLAYER_CAPACITY, validPlayerColor, playerInk, playerColorCSS } from './players.js';
 import { Net } from './net.js';
 import { TeamMatch, isTeamMode, modeOf, TEAM_COLORS, TEAM_NAMES } from './match.js';
 import { HUD, CONTROLS_HTML } from './hud.js';
@@ -57,7 +57,7 @@ function setLevel(key, on, force = false, team = false) {
 const setArena = (on) => setLevel(net.active ? matchMap(lobby.map || mapKey, lobby.gameMode) : playable(mapKey, on), on, false, !!(on && net.active && isTeamMode(lobby.gameMode)));
 const input = new Input(canvas);
 const hud = new HUD(document.getElementById('hud'));
-input.onWheel = (event) => hud.scrollBoard(event);
+input.onWheel = (event) => hud.scrollBoard(event) || (!!input.keys.score && input.captureScore());
 // A phone goes straight into touch controls - the decision is made once, here, on the way in.
 const hudEl = document.getElementById('hud');
 const touchMode = isTouchDevice();
@@ -90,6 +90,7 @@ const game = ctx.game = {
   addScore(pts, label) { const mult = 1 + Math.min(this.combo, 9) * 0.25; const p = Math.round(pts * mult); this.score += p; if (label) hud.kill(label, p); hud.setScore(this.score, this.combo); },
   onPlayerDeath() { endFocus(); onLocalDeath(); },
 };
+input.captureScore = () => (game.state === 'play' || game.state === 'dying') && !game.menu && !hud.el.screen.classList.contains('show');
 // 'ffa' is players against each other; 'coop' is the whole lobby against the waves.
 const online = () => game.mode !== 'solo';
 const teamMode = () => isTeamMode(game.mode);
@@ -107,7 +108,7 @@ ctx.grenadeOwnerPos = (id) => {
   const r = remote.get(id); if (!r || !r.alive) return null;
   return r.center.clone().add(new THREE.Vector3(0, 0.35, 0));
 };
-input.onControlCancel = () => { player.cancelGrenade?.(); player.cancelKnife?.(); };
+input.onControlCancel = () => { player.cancelGrenade?.(); player.cancelKnife?.(); boardToggle = false; };
 const lobby = { players: new Map(), hostId: null, isPublic: true, status: '', code: '', map: null, gameMode: 'ffa', ballistics: false, diff: 'easy', mob: 'mid', weaponMode: 'normal', skin: 'classic' };
 const colorSeats = new Map(); // recently departed ids -> { color, until }, shared with the next host
 const scores = new Map();      // peer id -> { name, kills, deaths }
@@ -649,14 +650,17 @@ function boardHTML(title = null) {
 const _navDirection = new THREE.Vector3();
 function updateNavigation(playing) {
   if (!playing || game.menu) { hud.setNavigation(null); return; }
-  const observed = match.spectatedId ? remote.get(match.spectatedId) : player;
+  const team = teamMode(), ownTeam = match.team(net.id);
+  const spectatedId = team && match.spectatedId && match.actor(match.spectatedId)?.alive && match.team(match.spectatedId) === ownTeam ? match.spectatedId : null;
+  const observed = spectatedId ? remote.get(spectatedId) : player;
   const pos = observed?.body.pos || player.body.pos;
   R.camera.getWorldDirection(_navDirection);
   const heading = (Math.atan2(_navDirection.x, -_navDirection.z) * 180 / Math.PI + 360) % 360;
   const teammates = [], open = !hud.el.board.hidden;
-  if (open && (teamMode() || coop())) for (const [id, r] of remote) {
-    if (!r.alive || r.idle || id === match.spectatedId || (teamMode() && match.team(id) !== match.team(net.id))) continue;
-    teammates.push({ pos: r.body.pos, color: playerColorCSS(lobby.players.get(id)?.color ?? 0) });
+  if (team || (open && coop())) for (const [id, r] of remote) {
+    // A living teammate holding an angle still belongs on the map after the idle timer starts.
+    if (!r.alive || (!team && r.idle) || r.away || id === spectatedId || (team && (!match.actor(id)?.alive || match.team(id) !== ownTeam))) continue;
+    teammates.push({ pos: r.body.pos, color: playerColorCSS(team ? TEAM_COLORS[ownTeam] : lobby.players.get(id)?.color ?? 0) });
   }
   let bomb = null;
   const objective = open && game.mode === 'demolition' && match.state?.bomb;
@@ -665,7 +669,7 @@ function updateNavigation(playing) {
     const p = carried || (objective.pos && { x: objective.pos[0], y: objective.pos[1], z: objective.pos[2] });
     if (p) bomb = { pos: p, planted: objective.status === 'planted' };
   }
-  hud.setNavigation({ level, world, pos, heading, alive: !!observed?.alive, name: mapName(level.key), skin: ctx.skin(), teammates, sites: game.mode === 'demolition' ? level.bombSites || [] : [], bomb });
+  hud.setNavigation({ level, world, pos, heading, alive: !!observed?.alive && (!team || !!match.actor(spectatedId || net.id)?.alive), minimap: team, spectating: !!spectatedId, name: mapName(level.key), skin: ctx.skin(), teammates, sites: game.mode === 'demolition' ? level.bombSites || [] : [], bomb });
 }
 function checkWin() {
   if (!net.isHost || game.mode !== 'ffa' || game.over) return;
@@ -711,16 +715,17 @@ function applyTeams() {
   for (const [id, p] of lobby.players) { const color = displayedColor(p); if (id === net.id) { player.team = p.team ?? 0; player.ink = playerInk(color); } else { const r = addRemote(id, p.name, color, p.appearance); r.team = p.team ?? 0; r.bot = !!p.bot; } }
   applySkin();
 }
-function balanceTeams() { const n = [0, 0]; for (const p of lobby.players.values()) { if (![0, 1].includes(p.team)) p.team = n[0] <= n[1] ? 0 : 1; n[p.team]++; } applyTeams(); }
-function addBot(team = assignTeam()) {
-  if (!net.isHost || game.state !== 'lobby' || !isTeamMode(lobby.gameMode) || lobby.players.size >= net.maxPlayers || [...lobby.players.values()].filter((p) => p.team === team).length >= 5) return;
+function balanceTeams() { const n = [0, 0]; for (const p of lobby.players.values()) { if (![0, 1].includes(p.team) || n[p.team] >= 16) p.team = n[0] <= n[1] ? 0 : 1; n[p.team]++; } applyTeams(); }
+function addBot(team = assignTeam(), batch = false) {
+  if (!net.isHost || game.state !== 'lobby' || !isTeamMode(lobby.gameMode) || ![0, 1].includes(team) || lobby.players.size >= net.maxPlayers || [...lobby.players.values()].filter((p) => p.team === team).length >= 16) return;
   const seq = (lobby.botSeq || 0) + 1; lobby.botSeq = seq; const id = 'bot:' + net.id + ':' + seq;
   const genders = ['male', 'female', 'neutral'], tones = [0, 1, 2, 3, 4, 5], hair = ['short', 'bob', 'curly', 'ponytail', 'crop', 'bald'];
-  lobby.players.set(id, { name: 'BOT ' + seq, color: seq % 10, team, bot: true, appearance: appearanceOf({ gender: genders[seq % genders.length], tone: tones[seq % tones.length], hair: hair[seq % hair.length] }) }); applyTeams(); broadcastLobby();
+  lobby.players.set(id, { name: 'BOT ' + seq, color: assignPlayerColor(id), team, bot: true, appearance: appearanceOf({ gender: genders[seq % genders.length], tone: tones[seq % tones.length], hair: hair[seq % hair.length] }) }); if (!batch) { applyTeams(); broadcastLobby(); }
 }
+function fillBots() { if (!net.isHost || game.state !== 'lobby' || !isTeamMode(lobby.gameMode)) return; while (lobby.players.size < net.maxPlayers) { const before = lobby.players.size; addBot(assignTeam(), true); if (lobby.players.size === before) break; } applyTeams(); broadcastLobby(); }
 function changeTeam(id, team) {
   if (!net.isHost || game.state !== 'lobby' || !isTeamMode(lobby.gameMode) || ![0, 1].includes(team)) return;
-  const p = lobby.players.get(id); if (!p || [...lobby.players.values()].filter((p) => p.team === team).length >= 5) return; p.team = team; applyTeams(); broadcastLobby();
+  const p = lobby.players.get(id); if (!p || [...lobby.players.values()].filter((p) => p.team === team).length >= 16) return; p.team = team; applyTeams(); broadcastLobby();
 }
 net.on('teamreq', (d, from) => changeTeam(from, d.team));
 function reservedColors() { for (const [id, seat] of colorSeats) if (seat.until <= Date.now()) colorSeats.delete(id); return [...colorSeats.entries()].map(([id, seat]) => ({ id, ...seat })); }
@@ -731,8 +736,9 @@ function assignPlayerColor(id, prev) {
   const held = new Set(reservedColors().map((p) => p.color));
   const preferred = lobby.players.get(id)?.color ?? colorSeats.get(id)?.color ?? lobby.players.get(prev)?.color ?? colorSeats.get(prev)?.color;
   if (validPlayerColor(preferred) && !used.has(preferred)) return preferred;
-  const fresh = PLAYER_INKS.findIndex((_, slot) => !used.has(slot) && !held.has(slot));
-  return fresh >= 0 ? fresh : PLAYER_INKS.findIndex((_, slot) => !used.has(slot));
+  const slots = Array.from({ length: PLAYER_CAPACITY }, (_, slot) => slot);
+  const fresh = slots.find(slot => !used.has(slot) && !held.has(slot)) ?? -1;
+  return fresh >= 0 ? fresh : slots.find(slot => !used.has(slot)) ?? -1;
 }
 function applyLobbyPlayers(rows, reservations) {
   const ids = new Set(rows.map((p) => p.id));
@@ -1179,8 +1185,10 @@ function wireCheckpoints(onGo) { const box = hud.el.panel.querySelector('.checkp
 const mapName = (k) => (LEVELS.find((m) => m.key === k) || LEVELS[0]).name;
 function mapHTML(sel, canPick, ffa = false, team = false) {
   const list = team ? LEVELS : arenaMaps(ffa); if (list.length < 2) return '';
-  const reference = sel === 'zijingang' ? `<div class="map-note">${ts('Campus-inspired layout - 240 x 180 m - 8x Depot area')}<br>${ts('Map reference')}: <a href="https://map.zju.edu.cn/" target="_blank" rel="noopener">${ts('Campus map')}</a> · &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div>` : '';
-  return `<div class="mapsel" id="mapsel"><span>${ts('map')}</span>${list.map((m) => `<button type="button" class="mapbtn${m.key === sel ? ' on' : ''}" data-map="${m.key}" ${canPick ? '' : 'disabled'}>${ts(m.name)}<i>${ts(m.blurb)}</i></button>`).join('')}</div>${reference}`;
+  const selected = list.find(m => m.key === sel);
+  const landmark = selected?.reference ? `<div class="map-note">${ts(selected.note)}<br>${ts('Map reference')}: <a href="${selected.reference}" target="_blank" rel="noopener">${ts(selected.referenceName)}</a></div>` : '';
+  const reference = sel === 'zijingang' ? `<div class="map-note">${ts('Campus-inspired layout - 480 x 360 m - expanded campus and lakeside')}<br>${ts('Map reference')}: <a href="https://map.zju.edu.cn/" target="_blank" rel="noopener">${ts('Campus map')}</a> · &copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener">OpenStreetMap contributors</a></div>` : sel === 'timesquare' ? `<div class="map-note">${ts('New York at dusk - 100 x 220 m - Broadway, Duffy Square and landmark towers')}<br>${ts('Map reference')}: <a href="https://www.timessquarenyc.org/" target="_blank" rel="noopener">Times Square Alliance</a></div>` : '';
+  return `<div class="mapsel" id="mapsel"><span>${ts('map')}</span>${list.map((m) => `<button type="button" class="mapbtn${m.key === sel ? ' on' : ''}" data-map="${m.key}" ${canPick ? '' : 'disabled'}>${ts(m.name)}<i>${ts(m.blurb)}</i></button>`).join('')}</div>${reference}${landmark}`;
 }
 function wireMap(onPick) { const box = hud.el.panel.querySelector('#mapsel'); if (!box) return; box.addEventListener('click', (e) => { e.stopPropagation(); const b = e.target.closest('.mapbtn'); if (b && !b.disabled) onPick(b.dataset.map); }); }
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
@@ -1246,12 +1254,12 @@ function mainHTML() {
   return `<h1>DOODLE DISTRICT</h1><h2>${ts(ctx.skin() === 'toon' ? 'a sunlit cartoon combat playground' : 'a scribbled survival shooter')}</h2>
     ${skinHTML(ctx.skin(), true)}
     ${appearanceHTML()}
-    <div class="mainbtns"><button type="button" class="start" id="soloBtn">START<i>solo · survive the waves</i></button><button type="button" id="onlineBtn">PLAY ONLINE<i>free for all or squad survival · up to 10 players</i></button></div>
+    <div class="mainbtns"><button type="button" class="start" id="soloBtn">START<i>solo · survive the waves</i></button><button type="button" id="onlineBtn">PLAY ONLINE<i>free for all or squad survival · up to 32 players</i></button></div>
     ${mapHTML(mapKey, true)}${touchMode ? TOUCH_CONTROLS_HTML : CONTROLS_HTML}${settingsHTML()}${checkpointHTML()}${best ? `<div class="beststat">${t`best score: ${best}`}</div>` : ''}`;
 }
 const sameOrigin = () => (typeof location !== 'undefined' && /^https?:$/.test(location.protocol) ? location.host : 'localhost:8080');
 function onlineHTML() {
-  return `<h1>PLAY ONLINE</h1><h2>team battles, demolition or survival · up to 10 players</h2>
+  return `<h1>PLAY ONLINE</h1><h2>team battles, demolition or survival · up to 32 players</h2>
     <div class="online" id="online">
       <div class="row"><span>your name</span><input type="text" class="namebox" id="setName" maxlength="14" value="${esc(myName)}"></div>
       <div class="row"><button type="button" class="big" id="quickBtn">QUICK PLAY</button><span class="hint">jumps into an open public lobby, or opens one for you</span></div>
@@ -1306,7 +1314,8 @@ function lobbyHTML() {
       ${diffHTML(ctx.difficulty(), host)}
       ${isCoop ? '' : mobHTML(lobby.mob || 'mid', host)}
       <div class="hint">${lobby.isPublic ? 'this lobby is public: anyone can quick play in, or type the code' : 'private lobby: friends type this code under PLAY ONLINE → JOIN'}</div>
-      ${isTeamMode(lobby.gameMode) ? `<div class="team-lobby">${[0, 1].map((team) => `<section class="team-${team}"><h3>${ts(TEAM_NAMES[team])} <small>${rows.filter((p) => p.team === team).length}/5</small></h3>${rows.filter((p) => p.team === team).map((p) => `<div class="team-seat">${playerNameHTML(p.id, p.name, true)}${p.bot ? `<small>BOT</small>${host ? `<button data-removebot="${esc(p.id)}" aria-label="${ts('REMOVE BOT')}">×</button>` : ''}` : p.id === lobby.hostId ? `<small>${ts('HOST')}</small>` : ''}${host || p.id === net.id ? `<button data-teamplayer="${esc(p.id)}" data-team="${1 - team}" title="${ts('SWITCH TEAM')}">↔</button>` : ''}</div>`).join('')}${host ? `<button data-addbot="${team}" ${n >= net.maxPlayers || rows.filter((p) => p.team === team).length >= 5 ? 'disabled' : ''}>${ts('ADD BOT')}</button>` : ''}</section>`).join('')}</div><div class="hint">${ts(lobby.gameMode === 'tdm' ? '50 team kills / 8 minutes - 3s respawn - friendly fire off' : 'First to 5 rounds - sides switch after round 4 - plant 5s / defuse 7s / C4 40s')}</div>` : `<div class="plist">${rows.map((p) => `<div class="${p.id === lobby.hostId ? 'host' : ''}${p.id === net.id ? ' me' : ''}">${playerNameHTML(p.id, p.name)}<span>${p.id === net.id ? 'you' : ''}</span></div>`).join('')}</div>`}
+      ${isTeamMode(lobby.gameMode) ? `<div class="team-lobby">${[0, 1].map((team) => `<section class="team-${team}"><h3>${ts(TEAM_NAMES[team])} <small>${rows.filter((p) => p.team === team).length}/16</small></h3>${rows.filter((p) => p.team === team).map((p) => `<div class="team-seat">${playerNameHTML(p.id, p.name, true)}${p.bot ? `<small>BOT</small>${host ? `<button data-removebot="${esc(p.id)}" aria-label="${ts('REMOVE BOT')}">×</button>` : ''}` : p.id === lobby.hostId ? `<small>${ts('HOST')}</small>` : ''}${host || p.id === net.id ? `<button data-teamplayer="${esc(p.id)}" data-team="${1 - team}" title="${ts('SWITCH TEAM')}">↔</button>` : ''}</div>`).join('')}${host ? `<button data-addbot="${team}" ${n >= net.maxPlayers || rows.filter((p) => p.team === team).length >= 16 ? 'disabled' : ''}>${ts('ADD BOT')}</button>` : ''}</section>`).join('')}</div><div class="hint">${ts(lobby.gameMode === 'tdm' ? '50 team kills / 8 minutes - 3s respawn - friendly fire off' : 'First to 5 rounds - sides switch after round 4 - plant 5s / defuse 7s / C4 40s')}</div>` : `<div class="plist">${rows.map((p) => `<div class="${p.id === lobby.hostId ? 'host' : ''}${p.id === net.id ? ' me' : ''}">${playerNameHTML(p.id, p.name)}<span>${p.id === net.id ? 'you' : ''}</span></div>`).join('')}</div>`}
+      ${host && isTeamMode(lobby.gameMode) ? `<div class="row"><button id="fillBotsBtn" ${n >= net.maxPlayers ? 'disabled' : ''}>${ts('FILL TO 32 WITH BOTS')}</button></div>` : ''}
       <div class="row"><button type="button" class="big" id="startBtn">START MATCH</button><button type="button" class="alt" id="leaveBtn">LEAVE</button></div>
       <div class="status" id="status">${esc(lobby.status || '')}</div><div class="hint">${(() => { const tail = n < 2 ? ts('people can still join once it is running') : t`${n} players in`; return host ? t`anyone can start · ${tail}` : t`anyone can start · only the host picks the mode and map · ${tail}`; })()}</div>
     </div>`;
@@ -1328,6 +1337,7 @@ function wireOnline() {
   box.addEventListener('click', (e) => e.stopPropagation()); box.addEventListener('keydown', (e) => e.stopPropagation());
   const q = (id) => box.querySelector('#' + id); wireName(box);
   box.querySelectorAll('[data-addbot]').forEach((b) => b.addEventListener('click', () => addBot(Number(b.dataset.addbot))));
+  if (q('fillBotsBtn')) q('fillBotsBtn').addEventListener('click', fillBots);
   box.querySelectorAll('[data-removebot]').forEach((b) => b.addEventListener('click', () => { if (net.isHost && game.state === 'lobby' && lobby.players.get(b.dataset.removebot)?.bot) { removeRemote(b.dataset.removebot); broadcastLobby(); } }));
   box.querySelectorAll('[data-teamplayer]').forEach((b) => b.addEventListener('click', () => { const team = Number(b.dataset.team); if (net.isHost) changeTeam(b.dataset.teamplayer, team); else if (b.dataset.teamplayer === net.id) net.send('teamreq', { team }); }));
   if (q('quickBtn')) q('quickBtn').addEventListener('click', () => { lockButtons(box); quickPlay(); });
@@ -1437,7 +1447,7 @@ function startMatch(late, spawnIdx, mode = 'ffa') {
 }
 function pause(at = performance.now()) { if ((game.state !== 'play' && !(game.state === 'dying' && online())) || game.menu) return; player.cancelGrenade(at); player.cancelKnife(); if (!online()) game.state = 'pause'; game.menu = true; showPause(); audio.reelLoop(false); }
 function resume() { if (online()) { player._resetGrenadeInput(); game.menu = false; if (game.state === 'dying' && game.respawnT <= 0) game.respawnArm = input.lastActive; hud.hideScreen(); hud.setGameplayVisible(true); if (!input.usingGamepad && !touchMode) input.requestLock(); return; } begin(); }
-Object.assign(window.__game, { match, addBot, changeTeam, broadcastLobby, startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, applySkin, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
+Object.assign(window.__game, { match, addBot, fillBots, changeTeam, broadcastLobby, startWave, updateWaves, begin, beginAtWave, jumpToWave, resetGame, spawnPickup, updatePickups, updateArenaPickups, supplySpot, pickups, applyRules, applySkin, focusCandidate, enterFocus, pickSpawn, startMatch, createLobby, joinLobby, quickPlay, leaveOnline, hostStart });
 hud.onScreenClick = () => {
   // the config sits on top of whatever screen opened it, so anything that would have dismissed that
   // screen dismisses the config first - backdrop, space bar, escape
@@ -1458,7 +1468,7 @@ for (const ev of ['pointerdown', 'keydown']) window.addEventListener(ev, () => {
 hud.setDevice(input.usingGamepad); applySettings(); hud.setWeapon(player.weapon.name, player.weapon.hint); showStart();
 
 // ---------------- loop ----------------
-let last = performance.now(), boardToggle = false, lockTipT = 0.5, musicHealT = 2;
+let last = performance.now(), boardToggle = false, boardTouchHeld = false, lockTipT = 0.5, musicHealT = 2;
 function tick(now) { requestAnimationFrame(tick); step(now); }
 // browsers starve animation frames in hidden tabs; a host that alt-tabs would freeze everyone's
 // match, so a coarse timer runs extra steps (never extra frame chains) while that happens
@@ -1479,16 +1489,18 @@ function step(now) {
   else if ((st === 'play' || st === 'dying') && game.menu && (input.pressed('jump') || input.pressed('confirm'))) resume();
   if (input.pressed('music')) { musicWanted = !musicWanted; localStorage.setItem('doodle_music', musicWanted ? '1' : '0'); audio.musicOn(musicWanted); hud.tip(musicWanted ? 'music on' : 'music off', 1.5); const mc = hud.el.panel.querySelector('#setMus'); if (mc) mc.checked = musicWanted; }
   if (playing) {
-    const toggle = input.usingGamepad || touchMode;
-    if (!toggle) boardToggle = false;
-    if (toggle && input.pressed('score')) boardToggle = !boardToggle;
+    // Bind hold/toggle to the control that was pressed, not the last device that moved. A
+    // controller stick or a phone's external keyboard must not change a held Tab into a toggle.
+    if (input.framePresses.score) boardToggle = false;
+    if ((input.touchKeys.score && !boardTouchHeld) || (input.padState.score && !input.padPrev.score)) boardToggle = !boardToggle;
     if (game.menu || (touchMode && ['fire', 'aim', 'grenade', 'interact'].some(a => input.pressed(a)))) boardToggle = false;
-    const want = ((input.down('score') && !toggle) || boardToggle) && !game.menu;
+    const want = (!!input.keys.score || !!input.framePresses.score || boardToggle) && input.captureScore();
     // the board is not a snapshot while it is held open: the ping column is live, and a column
     // that froze on whatever it read the instant you pressed Tab would be worse than none
     if (want !== !hud.el.board.hidden) { hud.setBoard(want && online() ? boardHTML() : null, want && !online()); boardT = 0; }
     else if (want && online()) { boardT += dt; if (boardT > 0.5) { boardT = 0; hud.setBoard(boardHTML()); } }
   } else { boardToggle = false; if (!hud.el.board.hidden) hud.setBoard(null); }
+  boardTouchHeld = !!input.touchKeys.score;
   if (st === 'play' && !game.menu && !input.pointerLocked && !input.usingGamepad && !touchMode) { lockTipT -= dt; if (lockTipT <= 0) { lockTipT = 2.5; hud.tip('click the page to grab the mouse', 2); } }
   let scale = 1;
   if (game.hitstopT > 0) { game.hitstopT -= dt; scale = game.hitstopScale; }

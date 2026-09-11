@@ -16,12 +16,16 @@ export const INK_COLORS = [
   new THREE.Vector3(0.44, 0.49, 0.06), // olive pen
 ];
 export const LIGHT_WORLD = new THREE.Vector3(0.38, 0.82, 0.42).normalize();
-export const SURFACE = { INK: 0, PLASTER: 1, GROUND: 2, STONE: 3, WOOD: 4, METAL: 5, GLASS: 6, FOLIAGE: 7, SKIN: 8, CLOTH: 9, WATER: 10, CERAMIC: 11 };
+export const SURFACE = { INK: 0, PLASTER: 1, GROUND: 2, STONE: 3, WOOD: 4, METAL: 5, GLASS: 6, FOLIAGE: 7, SKIN: 8, CLOTH: 9, WATER: 10, CERAMIC: 11, SCREEN: 12, BRICK: 13, LIMESTONE: 14, PAVING: 15, ROOFTILE: 16, LACQUER: 17, GRASS: 18, STUCCO: 19 };
 export const shared = { uLightDir: { value: new THREE.Vector3(0, 1, 0) }, uTime: { value: 0 }, uToon: { value: 0 } };
+const VIEW_INK_OFFSET = 512;
 
 const inkVert = /* glsl */`
 varying vec3 vNormalV;
 varying vec4 vColorData;
+#ifdef USE_BILLBOARD_MAP
+varying vec2 vBillboardUv;
+#endif
 uniform float uTime;
 void main() {
   vec3 transformed = position;
@@ -37,6 +41,9 @@ void main() {
   #endif
   vec4 mvPosition = modelViewMatrix * vec4(transformed, 1.0);
   vNormalV = normalize(normalMatrix * objectNormal);
+  #ifdef USE_BILLBOARD_MAP
+    vBillboardUv = uv;
+  #endif
   gl_Position = projectionMatrix * mvPosition;
 }`;
 
@@ -47,38 +54,75 @@ uniform float uFill;
 uniform float uShadeScale;
 uniform float uShadeBias;
 uniform float uSurface;
+uniform float uViewModel;
 uniform float uToon;
 uniform vec3 uLightDir;
 varying vec3 vNormalV;
 varying vec4 vColorData;
+#ifdef USE_BILLBOARD_MAP
+uniform sampler2D uBillboardMap;
+uniform float uBillboardReady;
+varying vec2 vBillboardUv;
+#endif
 void main() {
   vec3 n = normalize(vNormalV);
   if (!gl_FrontFacing) n = -n;
   float ndl = dot(n, uLightDir) * 0.5 + 0.5;
   float ink = uInk; float fill = uFill;
   if (vColorData.a > 0.0) { ink = vColorData.r; fill = vColorData.g; }
+  #ifdef USE_BILLBOARD_MAP
+    vec3 artwork = vec3(1.0);
+    if (uBillboardReady > 0.5) {
+      artwork = texture2D(uBillboardMap, vBillboardUv).rgb;
+      if (uToon > 0.5) {
+        // A negative ink ID marks emissive RGB in the remaining channels of the same buffer.
+        gl_FragColor = vec4(artwork.r, -1.0, artwork.gb);
+        return;
+      }
+    }
+  #endif
   if (uToon > 0.5) {
     vec3 oct = n / (abs(n.x) + abs(n.y) + abs(n.z));
     vec2 enc = oct.xy;
     if (oct.z < 0.0) enc = (1.0 - abs(enc.yx)) * vec2(enc.x >= 0.0 ? 1.0 : -1.0, enc.y >= 0.0 ? 1.0 : -1.0);
-    gl_FragColor = vec4(ndl, ink + 16.0 * uSurface, enc);
+    gl_FragColor = vec4(ndl, ink + 16.0 * uSurface + uViewModel * ${VIEW_INK_OFFSET.toFixed(1)}, enc);
     return;
   }
   float shade = clamp(ndl * uShadeScale + uShadeBias, 0.0, 1.0);
+  #ifdef USE_BILLBOARD_MAP
+    if (uBillboardReady > 0.5) shade = clamp(dot(artwork, vec3(0.299, 0.587, 0.114)), 0.035, 0.95);
+  #endif
   if (fill > 0.5) shade = -1.0;
   gl_FragColor = vec4(shade, ink, n.x, n.y);
 }`;
 
 export function makeInkMaterial(opts = {}) {
+  const surface = typeof opts.surface === 'number' ? opts.surface : SURFACE[String(opts.surface || 'ink').toUpperCase()] ?? SURFACE.INK;
+  const map = surface === SURFACE.SCREEN && opts.map?.isTexture ? opts.map : null;
   const m = new THREE.ShaderMaterial({
+    defines: map ? { USE_BILLBOARD_MAP: 1 } : {},
     uniforms: {
       uInk: { value: opts.ink ?? INK.BLUE }, uFill: { value: opts.fill ? 1 : 0 },
       uShadeScale: { value: opts.shadeScale ?? 1.0 }, uShadeBias: { value: opts.shadeBias ?? 0.0 },
-      uSurface: { value: typeof opts.surface === 'number' ? opts.surface : SURFACE[String(opts.surface || 'ink').toUpperCase()] ?? SURFACE.INK },
+      uSurface: { value: surface },
+      uViewModel: { value: 0 },
+      ...(map ? { uBillboardMap: { value: map }, uBillboardReady: { value: 0 } } : {}),
       uLightDir: shared.uLightDir, uTime: shared.uTime, uToon: shared.uToon,
     },
     vertexShader: inkVert, fragmentShader: inkFrag, side: opts.side ?? THREE.FrontSide,
   });
+  m.onBeforeRender = (renderer, scene, camera, geometry, object) => {
+    // Mark the camera-attached rig explicitly: nearby walls and floors are still world geometry.
+    let view = 0;
+    for (let p = object; p; p = p.parent) if (p === camera) { view = 1; break; }
+    if (m.uniforms.uViewModel.value !== view) { m.uniforms.uViewModel.value = view; m.uniformsNeedUpdate = true; }
+    if (map) {
+      // A slow or missing atlas keeps the existing flat sign instead of a black missing texture.
+      const image = map.source?.data || map.image;
+      const ready = image?.width > 0 && image?.height > 0 ? 1 : 0;
+      if (m.uniforms.uBillboardReady.value !== ready) { m.uniforms.uBillboardReady.value = ready; m.uniformsNeedUpdate = true; }
+    }
+  };
   m.inkId = opts.ink ?? INK.BLUE;
   return m;
 }
@@ -244,6 +288,11 @@ varying vec2 vUv;
 uniform sampler2D tScene;
 uniform sampler2D tDepth;
 uniform sampler2D tSurface;
+uniform sampler2D tBrick;
+uniform sampler2D tLimestone;
+uniform sampler2D tPaving;
+uniform sampler2D tGrass;
+uniform float uLandmarkReady;
 uniform vec2 uRes;
 uniform float uAspect;
 uniform float uTime;
@@ -255,6 +304,7 @@ uniform float uSlow;
 uniform float uLowHp;
 uniform float uViewOpacity;
 uniform float uMapMood;
+uniform float uCityDusk;
 uniform vec3 uHaze;
 uniform highp sampler2DShadow tSunDepth;
 uniform mat4 uSunMatrix;
@@ -292,6 +342,10 @@ vec3 skyColor(vec3 ray) {
   vec2 cp = ray.xz / max(ray.y + 0.30, 0.08) * 1.6 + vec2(uTime * 0.0018, 0.0);
   float clouds = vnoise(cp) * 0.65 + vnoise(cp * 2.1 + 7.1) * 0.25 + vnoise(cp * 4.4) * 0.10;
   float cloud = smoothstep(0.51, 0.76, clouds) * smoothstep(0.0, 0.24, ray.y);
+  if (uCityDusk > 0.5) {
+    vec3 dusk = mix(vec3(0.81, 0.76, 0.65), vec3(0.17, 0.29, 0.41), smoothstep(-0.10, 0.85, ray.y));
+    return mix(dusk, vec3(0.74, 0.73, 0.67), cloud * 0.16);
+  }
   sky = mix(sky, vec3(0.99, 0.97, 0.89), cloud * 0.87);
   float sun = pow(max(dot(ray, normalize(vec3(0.38, 0.82, 0.42))), 0.0), 28.0);
   sky += vec3(0.13, 0.095, 0.025) * sun;
@@ -309,9 +363,39 @@ vec3 surfaceColor(float packed, vec3 p, vec2 uv, float brush) {
   float ink = mod(packed, 16.0);
   vec3 tint = inkColor(packed);
   vec3 base = mix(tint, vec3(1.0), 0.15);
+  // Billboard lettering shares the ink palette; OLIVE becomes warm white only on screens.
+  if (kind > 11.5 && kind < 12.5) {
+    if (ink > 8.5) return vec3(0.96, 0.95, 0.86);
+    if (ink > 1.5 && ink < 2.5) return vec3(0.025, 0.04, 0.055);
+    return min(tint * 1.02 + vec3(0.055), vec3(0.98));
+  }
   float broad = vnoise(p.xz * 0.09 + p.y * 0.035);
   if (kind < 0.5) return base;
-  if (kind < 1.5) {
+  if (kind > 12.5) {
+    // Independent repeat textures give every material its own mip chain. A shared atlas would
+    // bleed pale limestone into distant grass; world coordinates keep details fixed as we turn.
+    float scale = kind < 13.5 ? 0.55 : kind < 14.5 ? 0.24 : kind < 15.5 ? 0.50 : 0.40;
+    vec2 q = uv * scale;
+    vec2 qdx = dFdx(q), qdy = dFdy(q);
+    vec3 stone = kind < 13.5 ? textureGrad(tBrick, q, qdx, qdy).rgb : kind < 14.5 ? textureGrad(tLimestone, q, qdx, qdy).rgb : kind < 15.5 ? textureGrad(tPaving, q, qdx, qdy).rgb : textureGrad(tGrass, q, qdx, qdy).rgb;
+    vec3 fallback = kind < 13.5 ? vec3(0.46, 0.47, 0.43) : kind < 14.5 ? vec3(0.80, 0.77, 0.68) : kind < 15.5 ? vec3(0.53, 0.25, 0.18) : vec3(0.30, 0.41, 0.20);
+    base = mix(fallback * (0.94 + brush * 0.12), stone, uLandmarkReady);
+    if (kind > 17.5) base *= vec3(0.90, 1.17, 0.83);
+    if (kind > 15.5 && kind < 16.5) {
+      base = ink > 2.5 && ink < 3.5 ? vec3(0.69, 0.46, 0.12) : ink > 3.5 && ink < 7.5 ? vec3(0.19, 0.31, 0.25) : vec3(0.29, 0.32, 0.30);
+      vec2 tq = uv * vec2(3.2, 2.6);
+      float rib = 0.5 + 0.5 * cos(tq.x * 6.2831853);
+      float fade = 1.0 - smoothstep(0.18, 0.7, max(fwidth(tq.x), fwidth(tq.y)));
+      base *= 0.94 + brush * 0.07 + rib * fade * 0.11;
+      base *= 1.0 - tileJoint(uv * vec2(1.23, 1.0), 2.6, 0.022) * 0.23;
+    } else if (kind > 16.5 && kind < 17.5) {
+      base = ink < 0.5 ? vec3(0.12, 0.24, 0.31) : ink < 1.5 ? vec3(0.53, 0.14, 0.10) : ink > 5.5 && ink < 6.5 ? vec3(0.12, 0.33, 0.30) : ink > 3.5 && ink < 4.5 ? vec3(0.21, 0.34, 0.23) : vec3(0.41, 0.27, 0.12);
+      base *= 0.96 + brush * 0.08;
+    } else if (kind > 18.5) {
+      base = ink < 0.5 ? vec3(0.87, 0.87, 0.82) : ink > 3.5 && ink < 4.5 ? vec3(0.63, 0.69, 0.65) : ink > 4.5 && ink < 5.5 ? vec3(0.77, 0.67, 0.62) : vec3(0.82, 0.77, 0.62);
+      base *= 0.975 + brush * 0.05;
+    }
+  } else if (kind < 1.5) {
     base = mix(vec3(0.91, 0.80, 0.64), vec3(0.95, 0.89, 0.77), broad);
     if (ink > 0.5 && ink < 1.5) base = vec3(0.80, 0.49, 0.36);
     else if (ink > 2.5 && ink < 3.5) base = vec3(0.93, 0.70, 0.39);
@@ -392,17 +476,25 @@ void main() {
   bool isSky = z >= 0.99999;
   vec3 col = sky;
   if (!isSky) {
+    bool billboard = s.g < -0.5;
+    if (billboard) col = s.rba;
+    else {
     vec3 n = viewNormal(s.ba), wn = normalize(mat3(uInvView) * n);
-    float normalEdge = length(viewNormal(sl.ba) - viewNormal(sr.ba)) + length(viewNormal(su.ba) - viewNormal(sd.ba));
-    edge = max(edge, smoothstep(0.7, 1.5, normalEdge) * 0.52);
+    // A billboard stores color where other surfaces store normals, including neighboring pixels.
+    if (sl.g >= 0.0 && sr.g >= 0.0 && su.g >= 0.0 && sd.g >= 0.0) {
+      float normalEdge = length(viewNormal(sl.ba) - viewNormal(sr.ba)) + length(viewNormal(su.ba) - viewNormal(sd.ba));
+      edge = max(edge, smoothstep(0.7, 1.5, normalEdge) * 0.52);
+    }
     vec3 wp = (uInvView * vec4(vp, 1.0)).xyz;
     vec3 an = abs(wn);
     vec2 surfUv = an.y > max(an.x, an.z) ? wp.xz : (an.x > an.z ? wp.zy : wp.xy);
-    // The held model uses view coordinates, so cloth/metal grain does not slide as the player moves.
-    if (d < 2.0) surfUv = vp.xy * 3.0;
+    // Only the held rig uses view coordinates; depth cannot distinguish it from nearby terrain.
+    bool held = s.g >= ${VIEW_INK_OFFSET.toFixed(1)};
+    float packed = s.g - (held ? ${VIEW_INK_OFFSET.toFixed(1)} : 0.0);
+    if (held) surfUv = vp.xy * 3.0;
     float brush = texture2D(tSurface, surfUv * 0.17).r * 0.6 + vnoise(surfUv * 1.3) * 0.4;
-    vec3 base = surfaceColor(s.g, wp, surfUv, brush);
-    float kind = floor(s.g / 16.0 + 0.001);
+    vec3 base = surfaceColor(packed, wp, surfUv, brush);
+    float kind = floor(packed / 16.0 + 0.001);
     float ndl = clamp(s.r * 2.0 - 1.0, -1.0, 1.0);
     float lit = smoothstep(-0.18, 0.85, ndl);
     float bounce = max(-wn.y, 0.0);
@@ -421,6 +513,7 @@ void main() {
       vec3 reflection = reflect(ray, wn);
       float fresnel = 0.18 + 0.36 * pow(1.0 - abs(dot(wn, ray)), 4.0);
       vec3 reflectedSky = mix(vec3(0.84, 0.89, 0.87), vec3(0.34, 0.64, 0.80), smoothstep(-0.1, 0.85, reflection.y));
+      if (uCityDusk > 0.5) reflectedSky = mix(vec3(0.67, 0.64, 0.56), vec3(0.20, 0.32, 0.44), smoothstep(-0.1, 0.85, reflection.y));
       col = mix(col, reflectedSky * vec3(0.77, 0.87, 0.91), fresnel);
     } else if (kind > 9.5 && kind < 10.5) {
       vec3 waterN = normalize(wn + vec3(sin(wp.x * 0.8 + uTime * 0.6) * 0.022, 0.0, cos(wp.z * 0.95 - uTime * 0.42) * 0.018));
@@ -434,9 +527,16 @@ void main() {
     float ao = occlusion(linDepth(zl), d, radius) + occlusion(linDepth(zr), d, radius)
              + occlusion(linDepth(zu), d, radius) + occlusion(linDepth(zd), d, radius);
     col *= 1.0 - ao * 0.065;
+    // Keep player skin and team uniforms readable as the surrounding architecture cools at dusk.
+    if (uCityDusk > 0.5 && !(kind > 7.5 && kind < 9.5)) col *= vec3(0.78, 0.84, 0.92);
+    // Static emissive faces stay legible in shadow without bloom, flicker or scanline aliasing.
+    if (kind > 11.5 && kind < 12.5) col = base;
     col = mix(col, col * vec3(0.67, 0.79, 0.87), uMapMood * 0.3);
+    }
     float haze = smoothstep(uHaze.x, uHaze.y, d) * uHaze.z;
-    col = mix(col, mix(vec3(0.83, 0.85, 0.80), sky, 0.35), haze);
+    vec3 hazeColor = mix(vec3(0.83, 0.85, 0.80), sky, 0.35);
+    if (uCityDusk > 0.5) { hazeColor = mix(vec3(0.62, 0.64, 0.62), sky, 0.4); if (billboard) haze *= 0.75; }
+    col = mix(col, hazeColor, haze);
   }
   // Keep contours delicate and neutral; the character's saturated uniform carries team identity.
   float edgeFade = mix(0.50, 0.17, smoothstep(24.0, 130.0, d));
@@ -473,7 +573,7 @@ export class InkRenderer {
         uTime: { value: 0 }, uNear: { value: this.camera.near }, uFar: { value: this.camera.far }, uHurt: { value: 0 }, uFlash: { value: 0 }, uSlow: { value: 0 },
         uLowHp: { value: 0 }, uViewOpacity: { value: -1 }, uLineSpacing: { value: 60 }, uPaper: { value: new THREE.Vector3(0.965, 0.955, 0.905) }, uInks: { value: INK_COLORS },
         uInvProj: { value: new THREE.Matrix4() }, uInvView: { value: new THREE.Matrix4() },
-        tSurface: { value: fallback }, uMapMood: { value: 0 }, uHaze: { value: new THREE.Vector3(38, 210, 0.72) },
+        tSurface: { value: fallback }, tBrick: { value: fallback }, tLimestone: { value: fallback }, tPaving: { value: fallback }, tGrass: { value: fallback }, uLandmarkReady: { value: 0 }, uMapMood: { value: 0 }, uCityDusk: { value: 0 }, uHaze: { value: new THREE.Vector3(38, 210, 0.72) },
         tSunDepth: { value: null }, uSunMatrix: { value: new THREE.Matrix4() },
         uSunDepthRange: { value: 1 }, uSunEnabled: { value: 0 },
       },
@@ -508,9 +608,29 @@ export class InkRenderer {
   }
   setMap(key) {
     this.map = key || 'district';
+    const far = this.map === 'zijingang' ? 700 : 420;
+    if (this.camera.far !== far) { this.camera.far = far; this.camera.updateProjectionMatrix(); }
     this.post.uniforms.uMapMood.value = this.map === 'undercity' ? 1 : 0;
-    // The campus spans eight Depot arenas; keep its distant route landmarks legible.
-    this.post.uniforms.uHaze.value.set(...(this.map === 'zijingang' ? [95, 360, 0.32] : [38, 210, 0.72]));
+    this.post.uniforms.uCityDusk.value = this.map === 'timesquare' ? 1 : 0;
+    // Longer sightlines need less haze to keep campus landmarks and city towers legible.
+    const landmark = ['summerpalace', 'yuanmingyuan', 'greatwall', 'lombard'].includes(this.map);
+    this.post.uniforms.uHaze.value.set(...(landmark ? [100, 400, 0.38] : this.map === 'zijingang' ? [95, 360, 0.32] : this.map === 'timesquare' ? [65, 300, 0.35] : [38, 210, 0.72]));
+    if (landmark && !this._landmarkRequested) {
+      this._landmarkRequested = true;
+      new THREE.TextureLoader().load(new URL('../assets/landmark-materials-v1.jpg', import.meta.url).href, atlas => {
+        this._landmark = [];
+        const size = Math.floor(atlas.image.width / 2);
+        for (const [i, name] of ['tBrick', 'tLimestone', 'tPaving', 'tGrass'].entries()) {
+          const canvas = document.createElement('canvas'); canvas.width = canvas.height = size;
+          canvas.getContext('2d').drawImage(atlas.image, (i % 2) * size + 2, Math.floor(i / 2) * size + 2, size - 4, size - 4, 0, 0, size, size);
+          const texture = new THREE.CanvasTexture(canvas); texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+          texture.minFilter = THREE.LinearMipmapLinearFilter; texture.magFilter = THREE.LinearFilter;
+          texture.anisotropy = Math.min(4, this.renderer.capabilities.getMaxAnisotropy());
+          this._landmark.push(texture); this.post.uniforms[name].value = texture;
+        }
+        atlas.dispose(); this.post.uniforms.uLandmarkReady.value = 1;
+      }, undefined, () => { this._landmarkFailed = true; });
+    }
   }
   setLevelGeometry(level) {
     // Cache only immutable map meshes. Players, viewmodels and moving/breakable props
@@ -522,7 +642,7 @@ export class InkRenderer {
     const moving = new Set([...(level.animated || []).map(a => a.mesh), ...(level.breakables || []).map(b => b.group)]);
     const bounds = new THREE.Box3();
     for (const root of level.meshes || []) {
-      if (moving.has(root) || root.userData.skin === 'classic') continue;
+      if (moving.has(root) || root.userData.skin === 'classic' || root.userData.noSun) continue;
       root.updateWorldMatrix(true, true);
       root.traverse(source => {
         if (!source.isMesh || !source.geometry || source.isSkinnedMesh || source.isInstancedMesh) return;

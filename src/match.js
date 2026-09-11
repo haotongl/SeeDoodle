@@ -19,6 +19,8 @@ export class TeamMatch {
   constructor(ctx, api) {
     this.ctx = ctx; Object.assign(this, api); this.state = null; this.intents = new Map(); this.applied = new Map(); this.syncAt = 0; this.intentAt = 0; this.spectator = 0;
     this.objectiveSeq = ctx.input.holdEventSeq; this.objectiveSerial = 0; this.objectiveHold = 0; this.objectiveHeld = false;
+    this.spectatorPose = { eye: new THREE.Vector3(), yaw: 0, pitch: 0, epoch: 0 };
+    this.spectatorView = { position: new THREE.Vector3(), rotation: new THREE.Quaternion(), target: new THREE.Quaternion(), euler: new THREE.Euler(0, 0, 0, 'YXZ'), epoch: null };
     this.bots = new ArenaBots(ctx, this);
     this.panel = document.createElement('div'); this.panel.className = 'objective-hud'; this.panel.hidden = true; ctx.hud.root.appendChild(this.panel);
     this.spectatorPanel = document.createElement('div'); this.spectatorPanel.className = 'spectator-hud'; this.spectatorPanel.hidden = true; ctx.hud.root.appendChild(this.spectatorPanel);
@@ -33,7 +35,7 @@ export class TeamMatch {
     });
     this.net.on('botps', (d, from) => {
       const a = this.actor(d.id);
-      if (this.net.isHost || from !== this.net.hostId || !a?.bot || d.round !== this.state?.round || d.life !== a.life) return;
+      if (this.net.isHost || from !== this.net.hostId || !a?.bot || !a.alive || d.round !== this.state?.round || d.life !== a.life) return;
       const r = this.remote.get(d.id); if (r) { r.push(d.ps, performance.now() / 1000); r.lastSeen = performance.now(); }
     });
   }
@@ -94,7 +96,8 @@ export class TeamMatch {
     for (const a of s.actors) {
       const b = this.body(a.id); if (!b) continue;
       b.team = a.team;
-      if (this.applied.get(a.id) !== a.life) {
+      const newLife = this.applied.get(a.id) !== a.life;
+      if (newLife) {
         this.applied.set(a.id, a.life);
         if (a.id === this.net.id && a.alive) {
           this.restoreSpectator(); this.resetObjectiveInput(); this.ctx.hud.root.classList.remove('team-dead');
@@ -102,11 +105,16 @@ export class TeamMatch {
           P.regenRate = s.mode === 'demolition' ? 0 : P.regenRate;
           P._resetGrenadeInput();
         } else if (a.alive) {
-          b.snapA = b.snapB = null; b.push([...(a.ps?.slice(0, 3) || a.spawn), a.yaw, 0, a.ps?.[5] ?? 0, 80, a.hp, 0, 0, 0], performance.now() / 1000); b.body.pos.fromArray(a.ps?.slice(0, 3) || a.spawn);
+          b.snapA = b.snapB = null; b.push(a.ps || [...a.spawn, a.yaw, 0, 0, 80, a.hp, 0, 0, 0], performance.now() / 1000); b.body.pos.fromArray(a.ps?.slice(0, 3) || a.spawn);
         }
       }
       if (!a.alive) { b.alive = false; if (a.id === this.net.id) { game.state = game.over ? 'over' : 'dying'; P.rig.visible = false; } }
-      if (a.bot && a.ps && !this.net.isHost) b.push(a.ps, performance.now() / 1000);
+      if (a.bot && !this.net.isHost) {
+        // botps owns movement timing. Periodic match state repeats those poses and must
+        // only seed a missing/stalled stream, or the extra timestamps make motion stutter.
+        if (a.alive && a.ps && !newLife && (!b.snapB || performance.now() / 1000 - b.snapB.t > .35)) b.push(a.ps, performance.now() / 1000);
+        b.hp = a.hp;
+      }
       if (a.id === this.net.id) P.shieldT = Math.max(0, (a.protectedUntil - this.now()) / 1000);
     }
     if (s.reason === 'BOMB EXPLODED' && s.bomb?.pos && this.explosionRound !== s.round) {
@@ -335,19 +343,32 @@ export class TeamMatch {
     if (!b) { this.spectatorPanel.textContent = ts('No surviving teammates - waiting for next round'); return; }
     this.spectatedId = actor.id;
     if (!this.hiddenSpectator) this.hiddenSpectator = { body: b, root: b.root, visible: b.root?.visible, tagVisibility: b.nameTag?.style.visibility || '' };
+    b.viewHidden = true;
     if (b.root) b.root.visible = false;
     if (b.nameTag) b.nameTag.style.visibility = 'hidden';
-    this.ctx.camera.position.copy(b.eye); this.ctx.camera.rotation.set(b.pitch, b.yaw, 0, 'YXZ'); this.ctx.camera.updateMatrixWorld();
+    const pose = this.spectatorPose, view = this.spectatorView;
+    if (!b.sampleView(performance.now() / 1000, pose)) { pose.eye.copy(b.eye); pose.yaw = b.yaw; pose.pitch = b.pitch; pose.epoch = b.viewEpoch; }
+    view.target.setFromEuler(view.euler.set(pose.pitch, pose.yaw, 0, 'YXZ'));
+    if (view.epoch !== pose.epoch) { view.position.copy(pose.eye); view.rotation.copy(view.target); view.epoch = pose.epoch; }
+    else {
+      const blend = 1 - Math.exp(-Math.max(0, dt) * 24);
+      view.position.lerp(pose.eye, blend); view.rotation.slerp(view.target, blend);
+    }
+    // The dead local player's update still writes the shared camera each frame. Ease from
+    // our own previous pose, never from that corpse camera, including on low-FPS clients.
+    this.ctx.camera.position.copy(view.position); this.ctx.camera.quaternion.copy(view.rotation); this.ctx.camera.updateMatrixWorld();
     const hp = Math.max(0, Math.ceil(b.hp ?? actor.hp ?? 0));
     this.spectatorPanel.textContent = ts('SPECTATING {} - {} HP', this.lobby.players.get(actor.id)?.name || b.name, hp) + ' · ' + ts(this.ctx.input.usingTouch ? 'Tap NEXT to switch teammates' : this.ctx.input.usingGamepad ? 'R2 switches teammates' : 'Left click switches teammates');
   }
   restoreSpectator() {
     const hidden = this.hiddenSpectator;
     if (hidden) {
-      if (hidden.root && hidden.root === hidden.body.root) hidden.root.visible = !!hidden.visible && !hidden.body.away;
+      hidden.body.viewHidden = false;
+      if (hidden.body.root) hidden.body.root.visible = !hidden.body.away && (!!hidden.visible || !!hidden.body.snapB);
       if (hidden.body.nameTag) hidden.body.nameTag.style.visibility = hidden.tagVisibility;
     }
     this.hiddenSpectator = null; this.spectatedId = null;
+    this.spectatorView.epoch = null;
     this.spectatorPanel.hidden = true; this.ctx.hud.root.classList.remove('spectating');
   }
 }

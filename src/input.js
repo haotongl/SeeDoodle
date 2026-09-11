@@ -36,12 +36,18 @@ export class Input {
     };
 
     window.addEventListener('keydown', (e) => {
+      // Tab belongs to the held map only during play. Repeats must also suppress native focus
+      // traversal; otherwise a long hold escapes the game after the first keydown.
+      if (e.code === 'Tab') {
+        if (!(this.captureScore?.() ?? this.pointerLocked) || e.altKey || e.ctrlKey || e.metaKey) return;
+        e.preventDefault();
+      } else if (e.code !== 'Escape' && !this.pointerLocked && e.target?.closest?.('input, textarea, select, button, summary, a[href], [contenteditable]:not([contenteditable="false"])')) return;
+      if (['Space', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
       if (e.repeat) return;
       this.lastActive = performance.now(); const a = KEYMAP[e.code]; if (a) { this.keys[a] = true; if (this.usingGamepad && this.onDeviceChange) this.onDeviceChange(false); this.usingGamepad = false; }
       if (a) this.pressQueue[a] = true;
       if (a) this.markHold(a, true, 'key:' + e.code);
       if (!e.shiftKey) this.keys.sprint = false;
-      if (['Space', 'Tab', 'ArrowUp', 'ArrowDown'].includes(e.code)) e.preventDefault();
       this.anyInput = true;
     });
     window.addEventListener('keyup', (e) => { const a = KEYMAP[e.code]; if (a) { this.keys[a] = false; this.markHold(a, false, 'key:' + e.code); } if (!e.shiftKey) this.keys.sprint = false; });

@@ -52,7 +52,7 @@ export class TouchControls {
       this._grenadeKey = null; this.setGrenadeState(this._grenadeState);
       const m = this.rotEl && this.rotEl.querySelector('.rotmsg'); if (m) m.textContent = ts('turn your phone sideways');
     });
-    // shown by CSS only while the phone is upright; it sits outside .tc so a menu cannot hide it
+    // A passive portrait hint; CSS hides it while a menu or the tactical map is open.
     const rot = document.createElement('div');
     rot.className = 'tc-rot'; rot.innerHTML = `<span>▯</span><div class="rotmsg">${ts('turn your phone sideways')}</div>`;
     root.appendChild(rot); this.rotEl = rot;

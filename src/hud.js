@@ -18,6 +18,7 @@ export class HUD {
       <div class="hud-tl"><div class="score">SCORE <b id="score">0</b></div><div class="combo" id="combo"></div></div>
       <div class="hud-tr"><div class="wave">WAVE <b id="wave">1</b></div><div class="modifier" id="modifier"></div><div class="left"><b id="left">0</b> enemies left</div><div class="timer" id="timer"></div><div class="weapon-rule" id="weaponrule" hidden></div><div class="pvpscore" id="pvpscore" hidden></div></div>
       <div class="wayfinder" id="wayfinder" hidden><b id="heading"></b><span id="area"></span><small id="mapkey"></small></div>
+      <div class="minimap" id="minimap" hidden><canvas id="minimapcanvas" role="img"></canvas></div>
       <div class="board" id="board" hidden><section class="tactical-map"><h3 id="maptitle"></h3><canvas id="mapcanvas"></canvas><p id="maplegend"></p></section><section class="board-scores" id="boardscores"></section></div>
       <div class="bossbar" id="bossbar"><div class="bossname" id="bossname"></div><div class="bar big"><div class="fill red" id="bossfill"></div></div></div>
       <div class="hud-bl">
@@ -35,7 +36,7 @@ export class HUD {
     const q = (id) => root.querySelector('#' + id);
     this.el = { crosshair: q('crosshair'), gret: q('gret'), hitmarker: q('hitmarker'), dmg: q('dmg'), score: q('score'), combo: q('combo'), wave: q('wave'), modifier: q('modifier'), left: q('left'), timer: q('timer'), hpfill: q('hpfill'), hpnum: q('hpnum'), mag: q('mag'), reserve: q('reserve'), reloading: q('reloading'), tally: q('tally'), weapon: q('weapon'), hint: q('hint'), slots: q('slots'), tip: q('tip'), msg: q('msg'), msgsub: q('msgsub'), killfeed: q('killfeed'), screen: q('screen'), panel: q('panel'), nades: q('nades'), scope: q('scope'), focusmark: q('focusmark'), focusmeter: q('focusmeter'), fmfill: q('fmfill'), bossbar: q('bossbar'), bossname: q('bossname'), bossfill: q('bossfill'), pvpscore: q('pvpscore'), board: q('board'), gstam: q('gstam'), gstamfill: q('gstamfill'), cyc: q('cyc'), stam: q('stam'), stamfill: q('stamfill') };
     for (const id of ['nadestate', 'nadelabel', 'nadevalue', 'nadecharge', 'nadehint', 'knifestate', 'knifevalue', 'knifecharge', 'knifehint']) this.el[id] = q(id);
-    for (const id of ['wayfinder', 'heading', 'area', 'mapkey', 'maptitle', 'mapcanvas', 'maplegend', 'boardscores']) this.el[id] = q(id);
+    for (const id of ['wayfinder', 'heading', 'area', 'mapkey', 'maptitle', 'mapcanvas', 'maplegend', 'boardscores', 'minimap', 'minimapcanvas']) this.el[id] = q(id);
     this._msgT = 0; this._scope = false; this._nades = -1; this._pad = false; this.onDevice = null; this._fmShow = false; this._fmFrac = -1; this._fmReady = false; this._lastTally = -1; this._lastSlots = ''; this._ads = false; this._mode = ''; this.onScreenClick = null; this._tipT = 0; this._cycKind = ''; this._cycFrac = -1; this._touch = false; this._stamF = -1;
     this.el.screen.addEventListener('click', () => { if (this.onScreenClick) this.onScreenClick(); });
   }
@@ -151,6 +152,9 @@ export class HUD {
   setNavigation(info) {
     const el = this.el, visible = !!info && !this.root.classList.contains('nogame') && !el.screen.classList.contains('show');
     el.wayfinder.hidden = !visible || !el.board.hidden;
+    el.minimap.hidden = !visible || !info?.minimap || !el.board.hidden;
+    this.root.classList.toggle('minimap-on', !el.minimap.hidden);
+    if (el.minimap.hidden) this._minimapDrawAt = 0;
     if (!visible) return;
     const { level, pos, heading } = info;
     const zones = (level.zones || []).filter(z => {
@@ -167,22 +171,28 @@ export class HUD {
     if (el.area.textContent !== place) el.area.textContent = place;
     const key = this._touch ? ts('MAP / SCORE') : ts('{}: map / score', this.key('score'));
     if (el.mapkey.textContent !== key) el.mapkey.textContent = key;
+    if (!el.minimap.hidden && performance.now() >= (this._minimapDrawAt || 0)) {
+      this._minimapDrawAt = performance.now() + 80;
+      this._drawTactical(info, true);
+    }
     if (el.board.hidden || performance.now() < (this._mapDrawAt || 0)) return;
     this._mapDrawAt = performance.now() + 100;
     this._drawTactical(info);
   }
-  _drawTactical(info) {
-    const el = this.el, canvas = el.mapcanvas, width = Math.round(canvas.clientWidth), height = Math.round(canvas.clientHeight);
+  _drawTactical(info, compact = false) {
+    const el = this.el, canvas = compact ? el.minimapcanvas : el.mapcanvas, width = Math.round(canvas.clientWidth), height = Math.round(canvas.clientHeight);
     if (!width || !height) return;
     const ratio = Math.min(window.devicePixelRatio || 1, 2), level = info.level, B = level.bounds;
     const key = `${width}/${height}/${ratio}/${document.documentElement.lang}/${info.skin}/${info.sites.length}`;
-    const scale = Math.min((width - 28) / (B.maxX - B.minX), (height - 34) / (B.maxZ - B.minZ));
+    const scale = Math.min((width - (compact ? 20 : 28)) / (B.maxX - B.minX), (height - (compact ? 24 : 34)) / (B.maxZ - B.minZ));
     const x = v => width / 2 + (v - (B.minX + B.maxX) / 2) * scale;
     const z = v => height / 2 + (v - (B.minZ + B.maxZ) / 2) * scale;
-    if (this._mapLevel !== level || this._mapKey !== key) {
-      this._mapLevel = level; this._mapKey = key;
+    // Each view keeps its own static terrain; moving players only repaint the small overlay.
+    const cache = compact ? (this._minimapCache ||= {}) : (this._tacticalCache ||= {});
+    if (cache.level !== level || cache.key !== key) {
+      cache.level = level; cache.key = key;
       canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
-      const base = this._mapBase = document.createElement('canvas'); base.width = canvas.width; base.height = canvas.height;
+      const base = cache.base = document.createElement('canvas'); base.width = canvas.width; base.height = canvas.height;
       const g = base.getContext('2d'); g.scale(ratio, ratio);
       g.fillStyle = 'rgba(203,218,198,.25)'; g.fillRect(x(B.minX), z(B.minZ), (B.maxX - B.minX) * scale, (B.maxZ - B.minZ) * scale);
       const polygon = (points, fill) => { if (!points.length) return; g.beginPath(); points.forEach(([px, pz], i) => i ? g.lineTo(x(px), z(pz)) : g.moveTo(x(px), z(pz))); g.closePath(); g.fillStyle = fill; g.fill(); };
@@ -197,7 +207,7 @@ export class HUD {
       g.shadowColor = 'rgba(18,34,41,.95)'; g.shadowBlur = 3;
       const occupied = info.sites.map(site => ({ left: x(site.pos.x) - 13, right: x(site.pos.x) + 13, top: z(site.pos.z) - 13, bottom: z(site.pos.z) + 13 }));
       // Place landmark names around objective markers, keeping small maps readable in either language.
-      for (const label of [...level.tactical?.labels || []].sort((a, b) => Number(!!a.small) - Number(!!b.small))) {
+      for (const label of (compact ? [] : [...level.tactical?.labels || []]).sort((a, b) => Number(!!a.small) - Number(!!b.small))) {
         if (label.small && width < 240) continue;
         const text = ts(label.name), tw = Math.min(g.measureText(text).width, width * .46);
         const px = Math.max(tw / 2 + 4, Math.min(width - tw / 2 - 4, x(label.x)));
@@ -207,24 +217,37 @@ export class HUD {
           occupied.push(box); g.fillText(text, px, py, width * .46); break;
         }
       }
-      g.shadowBlur = 0; g.textAlign = 'left'; g.fillText(ts('NORTH'), 8, 12);
-      const metres = (B.maxX - B.minX) > 150 ? 50 : 20, sx = width - metres * scale - 12, sy = height - 9;
-      g.beginPath(); g.moveTo(sx, sy - 3); g.lineTo(sx, sy); g.lineTo(sx + metres * scale, sy); g.lineTo(sx + metres * scale, sy - 3); g.stroke();
-      g.textAlign = 'center'; g.fillText(metres + ' m', sx + metres * scale / 2, sy - 5);
+      g.shadowBlur = 0; g.textAlign = 'left'; g.fillText(ts(compact ? 'N' : 'NORTH'), 8, 12);
+      if (!compact) {
+        const metres = (B.maxX - B.minX) > 150 ? 50 : 20, sx = width - metres * scale - 12, sy = height - 9;
+        g.beginPath(); g.moveTo(sx, sy - 3); g.lineTo(sx, sy); g.lineTo(sx + metres * scale, sy); g.lineTo(sx + metres * scale, sy - 3); g.stroke();
+        g.textAlign = 'center'; g.fillText(metres + ' m', sx + metres * scale / 2, sy - 5);
+      }
     }
-    const g = canvas.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, canvas.width, canvas.height); g.drawImage(this._mapBase, 0, 0); g.scale(ratio, ratio);
+    const g = canvas.getContext('2d'); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, canvas.width, canvas.height); g.drawImage(cache.base, 0, 0); g.scale(ratio, ratio);
     // Only teammates supplied by main.js reach this layer. Enemy positions never enter the map.
-    const marker = (p, color, radius) => { g.beginPath(); g.arc(x(p.x), z(p.z), radius, 0, Math.PI * 2); g.fillStyle = color; g.fill(); g.strokeStyle = 'rgba(13,32,38,.85)'; g.lineWidth = 1.2; g.stroke(); };
-    for (const mate of info.teammates) marker(mate.pos, mate.color, 3);
-    g.font = 'bold 12px "Trebuchet MS", sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
-    for (const site of info.sites) { marker(site.pos, 'rgba(242,206,126,.85)', 9); g.fillStyle = '#26383f'; g.fillText(site.id, x(site.pos.x), z(site.pos.z)); }
-    if (info.bomb) {
+    const marker = (p, color, radius, stroke = 'rgba(13,32,38,.85)') => { g.beginPath(); g.arc(x(p.x), z(p.z), radius, 0, Math.PI * 2); g.fillStyle = color; g.fill(); g.strokeStyle = stroke; g.lineWidth = 1.2; g.stroke(); };
+    g.font = `bold ${compact ? 10 : 12}px "Trebuchet MS", sans-serif`; g.textAlign = 'center'; g.textBaseline = 'middle';
+    if (compact) for (const site of info.sites) marker(site.pos, 'rgba(242,206,126,.28)', 7, 'rgba(242,206,126,.8)');
+    for (const mate of info.teammates) marker(mate.pos, mate.color, compact ? 3.3 : 3, 'rgba(231,244,248,.85)');
+    if (!compact) for (const site of info.sites) { marker(site.pos, 'rgba(242,206,126,.85)', 9); g.fillStyle = '#26383f'; g.fillText(site.id, x(site.pos.x), z(site.pos.z)); }
+    if (info.bomb && !compact) {
       const p = info.bomb.pos; g.save(); g.translate(x(p.x), z(p.z)); g.rotate(Math.PI / 4);
       g.fillStyle = info.bomb.planted ? '#f29368' : '#f5dfa3'; g.strokeStyle = '#293b43'; g.lineWidth = 1.5; g.fillRect(-4, -4, 8, 8); g.strokeRect(-4, -4, 8, 8); g.restore();
     }
     if (info.alive) {
       const p = info.pos; g.save(); g.translate(x(p.x), z(p.z)); g.rotate(info.heading * Math.PI / 180);
-      g.fillStyle = '#fff5d1'; g.strokeStyle = '#243e48'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(0, -8); g.lineTo(5, 6); g.lineTo(0, 3); g.lineTo(-5, 6); g.closePath(); g.fill(); g.stroke(); g.restore();
+      if (compact) g.scale(.8, .8);
+      g.fillStyle = info.spectating ? '#a8e3ed' : '#fff5d1'; g.strokeStyle = '#243e48'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(0, -8); g.lineTo(5, 6); g.lineTo(0, 3); g.lineTo(-5, 6); g.closePath(); g.fill(); g.stroke(); g.restore();
+    }
+    if (compact) {
+      // Offset site letters so a player standing on the objective leaves both symbols readable.
+      g.fillStyle = '#ffe3a4'; g.shadowColor = 'rgba(13,32,38,.95)'; g.shadowBlur = 3;
+      for (const site of info.sites) g.fillText(site.id, Math.min(width - 6, x(site.pos.x) + 10), Math.max(7, z(site.pos.z) - 8));
+      g.shadowBlur = 0;
+      const label = ts(info.spectating ? 'Minimap - spectating teammate' : 'Minimap - you and teammates') + (info.sites.length ? ' - A / B' : '');
+      if (canvas.getAttribute('aria-label') !== label) canvas.setAttribute('aria-label', label);
+      return;
     }
     const title = ts(info.name), legend = ts(info.sites.length ? 'You - teammates - objective sites' : info.teammates.length ? 'You - teammates - map routes' : 'You - map routes');
     if (el.maptitle.textContent !== title) el.maptitle.textContent = title;
@@ -246,8 +269,8 @@ export class HUD {
     setTimeout(() => d.remove(), 1700); while (this.el.killfeed.children.length > 6) this.el.killfeed.firstChild.remove();
   }
   damageFrom(angle) { const i = document.createElement('i'); i.style.transform = `rotate(${(angle * 180 / Math.PI).toFixed(1)}deg)`; this.el.dmg.appendChild(i); setTimeout(() => i.remove(), 1000); }
-  showScreen(html) { this.el.panel.innerHTML = html; trDom(this.el.panel); this.el.screen.classList.add('show'); this.el.nadestate.hidden = true; this.el.knifestate.hidden = true; }
-  hideScreen() { this.el.screen.classList.remove('show'); }
+  showScreen(html) { this.el.screen.inert = false; this.el.panel.innerHTML = html; trDom(this.el.panel); this.el.screen.classList.add('show'); this.el.nadestate.hidden = true; this.el.knifestate.hidden = true; this.el.minimap.hidden = true; this.root.classList.remove('minimap-on'); }
+  hideScreen() { if (this.el.screen.contains(document.activeElement)) document.activeElement.blur(); this.el.screen.inert = true; this.el.screen.classList.remove('show'); }
   setGameplayVisible(v) { this.root.classList.toggle('nogame', !v); }
   update(dt) {
     if (this._msgT > 0) { this._msgT -= dt; if (this._msgT <= 0) { this.el.msg.classList.remove('show'); this.el.msgsub.textContent = ''; } }

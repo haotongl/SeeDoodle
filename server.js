@@ -24,7 +24,7 @@ const PORT = Number(process.argv[2] || process.env.PORT || 8080);
 // else — a reverse proxy — is the only thing that should be able to reach the game.
 const HOST = process.env.HOST || undefined;
 const ROOT = __dirname;
-const MAX_PLAYERS = 10;
+const MAX_PLAYERS = 32;
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1: they get misread over voice chat
 const MAX_FRAME = 1 << 20;
 const STALL_BYTES = 64 * 1024;   // unsent backlog past which superseded state is dropped, not queued
@@ -237,9 +237,9 @@ function freeCode() {
 function makeRoom(code, host, { isPublic, name, map, max }) {
   const room = {
     code, codes: new Set([code]), hostId: host.id, isPublic: !!isPublic,
-    members: new Map(), max: Math.min(Math.max(2, max || MAX_PLAYERS), 16),
+    members: new Map(), max: Number.isSafeInteger(max) ? Math.min(Math.max(2, max), MAX_PLAYERS) : MAX_PLAYERS,
     inMatch: false, accepting: true, hostName: name || '', map: map || null,
-    mode: null, combat: null, actors: new Map(), bots: new Map(), unshielded: new Map(),
+    mode: null, combat: null, actors: new Map(), bots: new Map(), lobbyBots: new Set(), evictedBots: new Set(), unshielded: new Map(),
   };
   rooms.set(code, room);
   return room;
@@ -259,7 +259,7 @@ function roomInfo(room) {
   return {
     code: room.code, players: room.members.size, max: room.max, inMatch: room.inMatch,
     hostName: room.hostName, isPublic: room.isPublic, map: room.map, full: room.members.size >= room.max,
-    mode: room.mode, bots: room.bots.size,
+    mode: room.mode, bots: room.lobbyBots.size,
   };
 }
 const roster = (room) => [...room.members.values()].map((m) => ({ id: m.id, name: m.name }));
@@ -287,6 +287,13 @@ function joinRoom(client, room, meta) {
   if (!room.accepting) return { error: 'that lobby is closed' };
   if (room.members.size >= room.max) return { error: 'that lobby is full' };
   leaveRoom(client);
+  // Reserve the human's seat before the host catches up with peer events. Keep retired bot IDs
+  // for the room's lifetime so queued snapshots or a reconnecting successor cannot restore them.
+  if (room.members.size + room.lobbyBots.size >= room.max) {
+    const id = room.lobbyBots.values().next().value;
+    room.evictedBots.add(id); room.lobbyBots.delete(id); room.bots.delete(id); room.actors.delete(id); room.unshielded.delete(id);
+    if (room.combat) room.combat.actors = room.combat.actors.filter((a) => a.id !== id);
+  }
   client.room = room;
   client.meta = meta || {};
   room.members.set(client.id, client);
@@ -397,14 +404,36 @@ function clearCombat(room) {
   room.combat = null; room.actors.clear(); room.bots.clear(); room.unshielded.clear();
   for (const member of room.members.values()) { member.grenades.clear(); member.hist.length = 0; member.buckets = {}; }
 }
+function noteLobby(room, d) {
+  if (!d || d.players === undefined) return true;
+  if (!Array.isArray(d.players) || d.players.length > room.max) return deny('oversized lobby roster');
+  const ids = new Set(), bots = new Set(), rows = [];
+  for (const row of d.players) {
+    if (!row || typeof row.id !== 'string' || !row.id.length || row.id.length > 96 || ids.has(row.id)) return deny('malformed lobby roster');
+    ids.add(row.id);
+    if (row.bot === true) {
+      if (room.members.has(row.id)) return deny('human listed as bot');
+      if (room.evictedBots.has(row.id)) continue;
+      bots.add(row.id);
+    }
+    rows.push(row);
+  }
+  if (room.members.size + bots.size > room.max) return deny('too many participants');
+  room.lobbyBots = bots; d.players = rows;
+  // Two joins can beat the first host reply. Trim retired bots instead of dropping that reply:
+  // it may be the only targeted start packet that the first joining player will receive.
+  if (Array.isArray(d.combat?.actors)) d.combat = { ...d.combat, actors: d.combat.actors.filter((a) => !(a?.bot === true && room.evictedBots.has(a.id))) };
+  return true;
+}
 function noteCombat(room, d) {
-  if (!d || !['tdm', 'demolition'].includes(d.mode) || !Number.isSafeInteger(d.round) || d.round < 0 || !combatPhases.has(d.phase) || !Array.isArray(d.actors) || d.actors.length > 32) return deny('malformed combat state');
+  if (!d || !['tdm', 'demolition'].includes(d.mode) || !Number.isSafeInteger(d.round) || d.round < 0 || !combatPhases.has(d.phase) || !Array.isArray(d.actors) || d.actors.length > room.max) return deny('malformed combat state');
   if (room.combat && d.mode === room.mode && d.round < room.combat.round) return deny('stale combat state');
   const actors = new Map(), bots = new Map();
   for (const row of d.actors) {
     if (!row || typeof row.id !== 'string' || row.id.length > 96 || !row.id.length || actors.has(row.id) || (row.team !== 0 && row.team !== 1) || !Number.isSafeInteger(row.life) || row.life < 0) return deny('malformed combat actor');
     const bot = row.bot === true;
-    if (bot && (room.members.has(row.id) || bots.size >= 16)) return deny('invalid bot actor');
+    if (bot && room.evictedBots.has(row.id)) continue;
+    if (bot && (room.members.has(row.id) || room.members.size + bots.size >= room.max)) return deny('invalid bot actor');
     if (!bot && !room.members.has(row.id)) continue;
     // A queued host snapshot cannot restore protection already surrendered by firing. Keep this
     // separate from ordinary expiry: warmup -> live legitimately grants the opening protection.
@@ -426,7 +455,7 @@ function noteCombat(room, d) {
       if (spawn) actor.hist.push({ t: Date.now(), x: spawn[0], y: spawn[1], z: spawn[2], alive: next.alive });
     }
   }
-  room.mode = d.mode; room.actors = actors; room.bots = bots;
+  room.mode = d.mode; room.actors = actors; room.bots = bots; room.lobbyBots = new Set(bots.keys());
   room.combat = { ...d, actors: [...actors.values()] };
   return room.combat;
 }
@@ -814,6 +843,7 @@ function onMessage(client, raw) {
         break;
       }
       if (m.tt === 'lobby' || m.tt === 'start') {
+        if (!noteLobby(room, m.d)) break;
         const mode = m.d && m.d.mode;
         if (typeof mode === 'string' && mode !== room.mode) { clearCombat(room); room.mode = mode; }
       }

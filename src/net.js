@@ -35,7 +35,7 @@ export class Net {
     this.handlers = new Map(); this.connected = false;
     this.onPeerJoin = null; this.onPeerLeave = null; this.onDisconnect = null; this.onAlias = null; this.onHostChange = null;
     this.onStall = null; this.onPeerStall = null;
-    this.maxPlayers = 10; this._accepting = true; this._inMatch = false; this._hostName = '';
+    this.maxPlayers = 32; this._accepting = true; this._inMatch = false; this._hostName = '';
     this.stats = { sent: 0, recv: 0 }; this.isPublic = false;
     this._waits = new Map(); this._waitSeq = 0; this._pingT = null; this.rtt = 0;
     this.token = null; this.resuming = false; this._resumeSeat = null; this._meta = {}; this.pings = {};
